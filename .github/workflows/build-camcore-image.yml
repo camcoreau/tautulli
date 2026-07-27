@@ -26,19 +26,23 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Download official CamCore artwork
+      - name: Prepare exact CamCore artwork
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p camcore-branding
 
-          curl --retry 3 --fail --silent --show-error --location \
-            "https://raw.githubusercontent.com/camcoreau/Seerr/develop/public/logo_full.svg" \
-            --output camcore-branding/camcore-logo.svg
+          cat camcore-branding/dark-logo.b64.* \
+            | tr -d '\r\n' \
+            | base64 --decode \
+            > camcore-branding/camcore-logo-dark.png
 
-          curl --retry 3 --fail --silent --show-error --location \
-            "https://raw.githubusercontent.com/camcoreau/Seerr/develop/public/logo_stacked.svg" \
-            --output camcore-branding/camcore-logo-stacked.svg
+          cat camcore-branding/light-logo.b64.* \
+            | tr -d '\r\n' \
+            | base64 --decode \
+            > camcore-branding/camcore-logo-light.png
+
+          echo "58d436201eff1ed379c8f3a1bfb818ef403fee75d188a8a6d478df65646232af  camcore-branding/camcore-logo-dark.png" | sha256sum --check
+          echo "9a8f29b247fcdfd670c58f48b7aa760e157fa8e042b8f8ffd9164c1bfa03fff0  camcore-branding/camcore-logo-light.png" | sha256sum --check
 
           curl --retry 3 --fail --silent --show-error --location \
             "https://raw.githubusercontent.com/camcoreau/Seerr/develop/public/os_icon.svg" \
