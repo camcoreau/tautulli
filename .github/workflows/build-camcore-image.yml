@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 concurrency:
@@ -30,6 +30,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p camcore-branding/generated
 
           cat camcore-branding/dark-logo.b64.* \
             | tr -d '\r\n' \
@@ -44,9 +45,25 @@ jobs:
           echo "58d436201eff1ed379c8f3a1bfb818ef403fee75d188a8a6d478df65646232af  camcore-branding/camcore-logo-dark.png" | sha256sum --check
           echo "9a8f29b247fcdfd670c58f48b7aa760e157fa8e042b8f8ffd9164c1bfa03fff0  camcore-branding/camcore-logo-light.png" | sha256sum --check
 
+          cp camcore-branding/camcore-logo-dark.png camcore-branding/generated/camcore-logo-dark.png
+          cp camcore-branding/camcore-logo-light.png camcore-branding/generated/camcore-logo-light.png
+
           curl --retry 3 --fail --silent --show-error --location \
             "https://raw.githubusercontent.com/camcoreau/Seerr/develop/public/os_icon.svg" \
             --output camcore-branding/camcore-icon.svg
+
+      - name: Publish newsletter logo assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add camcore-branding/generated/camcore-logo-dark.png camcore-branding/generated/camcore-logo-light.png
+
+          if ! git diff --cached --quiet; then
+            git commit -m "Publish approved CamCore logo assets [skip ci]"
+            git push
+          fi
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
