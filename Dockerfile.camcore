@@ -5,11 +5,13 @@ FROM lscr.io/linuxserver/tautulli:latest
 USER root
 
 LABEL org.opencontainers.image.title="CamCore Media Insights" \
-      org.opencontainers.image.description="CamCore-branded Tautulli monitoring and analytics interface" \
+      org.opencontainers.image.description="CamCore-branded Tautulli monitoring, analytics and newsletter interface" \
       org.opencontainers.image.source="https://github.com/camcoreau/tautulli"
 
-COPY camcore-branding/camcore-logo.svg /app/tautulli/data/interfaces/default/images/camcore-logo.svg
-COPY camcore-branding/camcore-logo-stacked.svg /app/tautulli/data/interfaces/default/images/camcore-logo-stacked.svg
+# The dark logo is for Tautulli's dark UI and dark newsletter background.
+# The light logo is packaged for any future light-background surface.
+COPY camcore-branding/camcore-logo-dark.png /app/tautulli/data/interfaces/default/images/camcore-logo-dark.png
+COPY camcore-branding/camcore-logo-light.png /app/tautulli/data/interfaces/default/images/camcore-logo-light.png
 COPY camcore-branding/camcore-icon.svg /app/tautulli/data/interfaces/default/images/favicon/camcore-icon.svg
 
 RUN python3 - <<'PY'
@@ -24,6 +26,7 @@ def replace_once(text: str, pattern: str, replacement: str, label: str, flags: i
     return updated
 
 
+# Main Tautulli interface: dark navigation bar, therefore use the dark-background logo.
 base_path = Path("/app/tautulli/data/interfaces/default/base.html")
 base = base_path.read_text(encoding="utf-8-sig")
 base = replace_once(
@@ -61,13 +64,15 @@ base = replace_once(
     base,
     r'<a class="navbar-brand" href="home" title="[^"]*">\s*<img[^>]+>\s*</a>',
     '''<a class="navbar-brand" href="home" title="CamCore Media Insights">
-                    <img src="${http_root}images/camcore-logo.svg" height="38" alt="CamCore Media Insights" style="max-width: 190px; width: auto;">
+                    <img src="${http_root}images/camcore-logo-dark.png" height="38" alt="CamCore — Cameron Family Secure Network" style="max-width: 190px; width: auto; object-fit: contain;">
                 </a>''',
     "navbar logo",
     re.S,
 )
 base_path.write_text(base, encoding="utf-8")
 
+
+# Tautulli sign-in page: dark background, therefore use the dark-background logo.
 login_path = Path("/app/tautulli/data/interfaces/default/login.html")
 login = login_path.read_text(encoding="utf-8-sig")
 login = replace_once(
@@ -105,10 +110,82 @@ login = replace_once(
     login,
     r'<div class="login-logo">\s*<img[^>]+>\s*</div>',
     '''<div class="login-logo">
-                    <img src="${http_root}images/camcore-logo-stacked.svg" height="110" alt="CamCore Media Insights" style="max-width: 280px; width: auto;">
+                    <img src="${http_root}images/camcore-logo-dark.png" height="110" alt="CamCore — Cameron Family Secure Network" style="max-width: 360px; width: auto; object-fit: contain;">
                 </div>''',
     "login logo",
     re.S,
 )
 login_path.write_text(login, encoding="utf-8")
+
+
+# Newsletter password page: Tautulli styling is dark, so use the dark-background logo.
+auth_path = Path("/app/tautulli/data/interfaces/default/newsletter_auth.html")
+auth = auth_path.read_text(encoding="utf-8-sig")
+auth = replace_once(
+    auth,
+    r"<title>.*?</title>",
+    r"<title>CamCore Media Newsletter - ${title}</title>",
+    "newsletter auth title",
+)
+auth = replace_once(
+    auth,
+    r'<div class="newsletter-logo">\s*<img[^>]+>\s*</div>',
+    '''<div class="newsletter-logo">
+                    <img src="${http_root}images/camcore-logo-dark.png" height="100" alt="CamCore — Cameron Family Secure Network" style="max-width: 360px; width: auto; object-fit: contain;">
+                </div>''',
+    "newsletter auth logo",
+    re.S,
+)
+auth_path.write_text(auth, encoding="utf-8")
+
+
+# Recently Added newsletters use a fixed dark #282A2D background.
+# Replace both the editable and generated/internal templates.
+for newsletter_name in ("recently_added.html", "recently_added.internal.html"):
+    newsletter_path = Path("/app/tautulli/data/interfaces/newsletters") / newsletter_name
+    if not newsletter_path.exists():
+        continue
+
+    newsletter = newsletter_path.read_text(encoding="utf-8-sig")
+    newsletter = replace_once(
+        newsletter,
+        r"<title>.*?</title>",
+        r"<title>CamCore Media Newsletter - ${subject}</title>",
+        f"{newsletter_name} title",
+    )
+    newsletter = re.sub(
+        r">Tautulli Newsletter\s*-\s*\$\{subject\}<",
+        r">CamCore Media Newsletter - ${subject}<",
+        newsletter,
+        count=1,
+    )
+    newsletter = replace_once(
+        newsletter,
+        r'<img[^>]+class="header-img"[^>]*>',
+        '''<img src="${base_url_image + 'images/camcore-logo-dark.png' if base_url_image else 'https://tautulli.inside.camcore.au/image/images/camcore-logo-dark.png'}" class="header-img" width="520" height="144" alt="CamCore — Cameron Family Secure Network" style="border: none; -ms-interpolation-mode: bicubic; max-width: 100%; width: 520px; height: auto; margin: 0 auto; display: block;">''',
+        f"{newsletter_name} header logo",
+    )
+    newsletter = newsletter.replace(
+        ".header {\n            width: 100%;\n            height: 90px;",
+        ".header {\n            width: 100%;\n            height: 145px;",
+    )
+    newsletter = re.sub(
+        r"\.header-img \{.*?\}",
+        ".header-img {\n            width: 520px;\n            height: auto;\n            margin: 0 auto;\n        }",
+        newsletter,
+        count=1,
+        flags=re.S,
+    )
+    newsletter = newsletter.replace(
+        "table[class=body] .header {\n                height: 75px !important;\n            }",
+        "table[class=body] .header {\n                height: auto !important;\n            }",
+    )
+    newsletter = re.sub(
+        r"table\[class=body\] \.header-img \{.*?\}",
+        "table[class=body] .header-img {\n                width: 410px !important;\n                height: auto !important;\n                margin: 0 auto !important;\n            }",
+        newsletter,
+        count=1,
+        flags=re.S,
+    )
+    newsletter_path.write_text(newsletter, encoding="utf-8")
 PY
