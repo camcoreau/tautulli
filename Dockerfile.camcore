@@ -1,0 +1,114 @@
+# syntax=docker/dockerfile:1.7
+
+FROM lscr.io/linuxserver/tautulli:latest
+
+USER root
+
+LABEL org.opencontainers.image.title="CamCore Media Insights" \
+      org.opencontainers.image.description="CamCore-branded Tautulli monitoring and analytics interface" \
+      org.opencontainers.image.source="https://github.com/camcoreau/tautulli"
+
+COPY camcore-branding/camcore-logo.svg /app/tautulli/data/interfaces/default/images/camcore-logo.svg
+COPY camcore-branding/camcore-logo-stacked.svg /app/tautulli/data/interfaces/default/images/camcore-logo-stacked.svg
+COPY camcore-branding/camcore-icon.svg /app/tautulli/data/interfaces/default/images/favicon/camcore-icon.svg
+
+RUN python3 - <<'PY'
+from pathlib import Path
+import re
+
+
+def replace_once(text: str, pattern: str, replacement: str, label: str, flags: int = 0) -> str:
+    updated, count = re.subn(pattern, replacement, text, count=1, flags=flags)
+    if count != 1:
+        raise SystemExit(f"Unable to apply CamCore branding replacement: {label}")
+    return updated
+
+
+base_path = Path("/app/tautulli/data/interfaces/default/base.html")
+base = base_path.read_text(encoding="utf-8-sig")
+base = replace_once(
+    base,
+    r"<title>.*?</title>",
+    r"<title>CamCore Media Insights - ${title} | ${server_name}</title>",
+    "main browser title",
+)
+base = replace_once(
+    base,
+    r'<meta name="description" content="[^"]*">',
+    '<meta name="description" content="CamCore Media Insights — private Plex monitoring and analytics.">',
+    "main description",
+)
+base = replace_once(
+    base,
+    r"<!-- Favicons -->.*?<!-- ICONS -->",
+    '''<!-- Favicons -->
+    <link rel="icon" type="image/svg+xml" href="${http_root}images/favicon/camcore-icon.svg">
+    <link rel="shortcut icon" href="${http_root}images/favicon/camcore-icon.svg">
+
+    <!-- ICONS -->''',
+    "main favicon block",
+    re.S,
+)
+base = base.replace(
+    '<meta name="apple-mobile-web-app-title" content="Tautulli">',
+    '<meta name="apple-mobile-web-app-title" content="CamCore Media Insights">',
+)
+base = base.replace(
+    '<meta name="application-name" content="Tautulli">',
+    '<meta name="application-name" content="CamCore Media Insights">',
+)
+base = replace_once(
+    base,
+    r'<a class="navbar-brand" href="home" title="[^"]*">\s*<img[^>]+>\s*</a>',
+    '''<a class="navbar-brand" href="home" title="CamCore Media Insights">
+                    <img src="${http_root}images/camcore-logo.svg" height="38" alt="CamCore Media Insights" style="max-width: 190px; width: auto;">
+                </a>''',
+    "navbar logo",
+    re.S,
+)
+base_path.write_text(base, encoding="utf-8")
+
+login_path = Path("/app/tautulli/data/interfaces/default/login.html")
+login = login_path.read_text(encoding="utf-8-sig")
+login = replace_once(
+    login,
+    r"<title>.*?</title>",
+    r"<title>CamCore Media Insights - ${title}</title>",
+    "login browser title",
+)
+login = replace_once(
+    login,
+    r'<meta name="description" content="[^"]*">',
+    '<meta name="description" content="Private CamCore Plex monitoring and analytics sign-in.">',
+    "login description",
+)
+login = replace_once(
+    login,
+    r"<!-- Favicons -->.*?<!-- ICONS -->",
+    '''<!-- Favicons -->
+    <link rel="icon" type="image/svg+xml" href="${http_root}images/favicon/camcore-icon.svg">
+    <link rel="shortcut icon" href="${http_root}images/favicon/camcore-icon.svg">
+
+    <!-- ICONS -->''',
+    "login favicon block",
+    re.S,
+)
+login = login.replace(
+    '<meta name="apple-mobile-web-app-title" content="Tautulli">',
+    '<meta name="apple-mobile-web-app-title" content="CamCore Media Insights">',
+)
+login = login.replace(
+    '<meta name="application-name" content="Tautulli">',
+    '<meta name="application-name" content="CamCore Media Insights">',
+)
+login = replace_once(
+    login,
+    r'<div class="login-logo">\s*<img[^>]+>\s*</div>',
+    '''<div class="login-logo">
+                    <img src="${http_root}images/camcore-logo-stacked.svg" height="110" alt="CamCore Media Insights" style="max-width: 280px; width: auto;">
+                </div>''',
+    "login logo",
+    re.S,
+)
+login_path.write_text(login, encoding="utf-8")
+PY
