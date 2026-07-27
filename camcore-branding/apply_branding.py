@@ -101,27 +101,31 @@ for newsletter_name in ("recently_added.html", "recently_added.internal.html"):
     newsletter = replace_once(
         newsletter,
         r'<img[^>]+class="header-img"[^>]*>',
-        f'''<img src="${{base_url_image + 'images/camcore-logo-dark.png' if base_url_image else '{public_dark_logo}'}}" class="header-img" width="520" height="144" alt="CamCore — Cameron Family Secure Network" style="border: none; -ms-interpolation-mode: bicubic; max-width: 100%; width: 520px; height: auto; margin: 0 auto; display: block;">''',
+        f'''<img src="${{base_url_image + 'images/camcore-logo-dark.png' if base_url_image else '{public_dark_logo}'}}" class="header-img" width="400" alt="CamCore — Cameron Family Secure Network" style="border: none; -ms-interpolation-mode: bicubic; max-width: 78%; width: 400px; height: auto; margin: 0 auto; display: block;">''',
         f"{newsletter_name} header logo",
     )
     newsletter = newsletter.replace(
-        ".header {\n            width: 100%;\n            height: 90px;",
-        ".header {\n            width: 100%;\n            height: 145px;",
+        ".header {\n            width: 100%;\n            height: 90px;\n            text-align: center;\n        }",
+        ".header {\n            width: 100%;\n            height: auto;\n            padding: 14px 0 8px;\n            text-align: center;\n        }",
+    )
+    newsletter = newsletter.replace(
+        '<div class="header" style="width: 100%;height: 90px;text-align: center;">',
+        '<div class="header" style="width: 100%;height: auto;text-align: center;padding: 14px 0 8px;">',
     )
     newsletter = re.sub(
         r"\.header-img \{.*?\}",
-        ".header-img {\n            width: 520px;\n            height: auto;\n            margin: 0 auto;\n        }",
+        ".header-img {\n            width: 400px;\n            max-width: 78%;\n            height: auto;\n            margin: 0 auto;\n        }",
         newsletter,
         count=1,
         flags=re.S,
     )
     newsletter = newsletter.replace(
         "table[class=body] .header {\n                height: 75px !important;\n            }",
-        "table[class=body] .header {\n                height: auto !important;\n            }",
+        "table[class=body] .header {\n                height: auto !important;\n                padding: 10px 0 6px !important;\n            }",
     )
     newsletter = re.sub(
         r"table\[class=body\] \.header-img \{.*?\}",
-        "table[class=body] .header-img {\n                width: 410px !important;\n                height: auto !important;\n                margin: 0 auto !important;\n            }",
+        "table[class=body] .header-img {\n                width: 300px !important;\n                max-width: 82% !important;\n                height: auto !important;\n                margin: 0 auto !important;\n            }",
         newsletter,
         count=1,
         flags=re.S,
