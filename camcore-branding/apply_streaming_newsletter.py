@@ -15,18 +15,21 @@ STREAMING_CSS = f'''
         }}
         .camcore-featured {{
             background-color: #10171D !important;
-            background-position: center !important;
-            background-repeat: no-repeat !important;
-            background-size: cover !important;
             border: 1px solid #2B3944 !important;
             border-radius: 16px !important;
             overflow: hidden !important;
         }}
-        .camcore-featured-overlay {{
-            background: rgba(6, 10, 13, 0.86) !important;
+        .camcore-featured-art {{
+            border: 0 !important;
+            display: block !important;
+            height: auto !important;
+            line-height: 0 !important;
+            max-width: 100% !important;
+            width: 100% !important;
         }}
         .camcore-featured-copy {{
-            padding: 34px 30px 30px !important;
+            background: #0B1014 !important;
+            padding: 30px !important;
             text-align: left !important;
         }}
         .camcore-featured-kicker {{
@@ -150,7 +153,7 @@ STREAMING_CSS = f'''
                 padding: 6px 5px 14px !important;
             }}
             table[class=body] .camcore-featured-copy {{
-                padding: 26px 20px 24px !important;
+                padding: 24px 20px !important;
             }}
             table[class=body] .camcore-featured-title {{
                 font-size: 27px !important;
@@ -183,39 +186,56 @@ STREAMING_CSS = f'''
 
 FEATURED_BLOCK = r'''
                     <%
-                        featured = recently_added['movie'][0] if recently_added.get('movie') else (recently_added['show'][0] if recently_added.get('show') else None)
-                        featured_kind = 'Movie' if recently_added.get('movie') else 'Series'
+                        featured_movies = recently_added.get('movie') or []
+                        featured_shows = recently_added.get('show') or []
+
+                        if featured_movies:
+                            featured = featured_movies[0]
+                            featured_kind = 'Movie'
+                            recently_added['movie'] = featured_movies[1:]
+                        elif featured_shows:
+                            featured = featured_shows[0]
+                            featured_kind = 'Series'
+                            recently_added['show'] = featured_shows[1:]
+                        else:
+                            featured = None
+                            featured_kind = None
                     %>
                     % if featured:
                     <tr class="camcore-featured-row">
                         <td class="camcore-featured-wrap" style="font-family: 'Open Sans', Helvetica, Arial, sans-serif;font-size: 14px;vertical-align: top;padding: 10px 14px 18px;">
-                            <table border="0" cellpadding="0" cellspacing="0" width="100%" class="camcore-featured" style="background-image: url(${(base_url_image + featured['art_hash']) if base_url_image else featured['art_url']});background-color: #10171D;background-position: center;background-repeat: no-repeat;background-size: cover;border: 1px solid #2B3944;border-radius: 16px;border-collapse: separate;overflow: hidden;width: 100%;">
+                            <table border="0" cellpadding="0" cellspacing="0" width="100%" class="camcore-featured" style="background-color: #10171D;border: 1px solid #2B3944;border-radius: 16px;border-collapse: separate;overflow: hidden;width: 100%;">
                                 <tr>
-                                    <td class="camcore-featured-overlay" style="background: rgba(6, 10, 13, 0.86);font-family: 'Open Sans', Helvetica, Arial, sans-serif;vertical-align: top;">
-                                        <div class="camcore-featured-copy" style="padding: 34px 30px 30px;text-align: left;">
-                                            <p class="camcore-featured-kicker" style="color: __TEAL_LIGHT__;font-size: 12px;font-weight: 800;letter-spacing: 2px;margin: 0 0 9px;text-transform: uppercase;">Featured This Week &nbsp;•&nbsp; ${featured_kind}</p>
-                                            <h1 class="camcore-featured-title" style="color: #FFFFFF;font-family: 'Open Sans', Helvetica, Arial, sans-serif;font-size: 34px;font-weight: 800;letter-spacing: -0.7px;line-height: 1.08;margin: 0 0 12px;">${featured['title']}</h1>
-                                            <p class="camcore-featured-meta" style="color: #C0CDD6;font-size: 13px;font-weight: 700;line-height: 1.6;margin: 0 0 13px;">
-                                                % if featured.get('year'):
-                                                ${featured['year']}
-                                                % endif
-                                                % if featured.get('duration'):
-                                                <% featured_duration = int(int(featured['duration']) / 60000) %>
-                                                &nbsp;•&nbsp; ${featured_duration} min
-                                                % endif
-                                                % if featured.get('genres'):
-                                                &nbsp;•&nbsp; ${' / '.join(featured['genres'][:2])}
-                                                % endif
-                                                % if featured.get('rating') or featured.get('audience_rating'):
-                                                <% featured_score = int(float(featured.get('rating') or featured.get('audience_rating')) * 10) %>
-                                                &nbsp;•&nbsp; ${featured_score}% rating
-                                                % endif
-                                            </p>
-                                            % if featured.get('summary'):
-                                            <p class="camcore-featured-summary" style="color: #D9E2E8;font-size: 15px;line-height: 1.55;margin: 0 0 20px;max-width: 620px;">${featured['summary'][:260] + (featured['summary'][260:] and '...')}</p>
+                                    <td style="font-family: 'Open Sans', Helvetica, Arial, sans-serif;font-size: 0;line-height: 0;vertical-align: top;">
+                                        <a href="${parameters['pms_web_url']}#!/server/${parameters['pms_identifier']}/details?key=%2Flibrary%2Fmetadata%2F${featured['rating_key']}" title="Watch ${featured['title']} on Cameron-Media" target="_blank" rel="noreferrer" style="display: block;text-decoration: none;">
+                                            <img class="camcore-featured-art" src="${(base_url_image + featured['art_hash']) if base_url_image else featured['art_url']}" width="1000" alt="${featured['title']} featured artwork" style="border: 0;display: block;height: auto;line-height: 0;max-width: 100%;width: 100%;">
+                                        </a>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td class="camcore-featured-copy" style="background: #0B1014;font-family: 'Open Sans', Helvetica, Arial, sans-serif;padding: 30px;text-align: left;vertical-align: top;">
+                                        <p class="camcore-featured-kicker" style="color: __TEAL_LIGHT__;font-size: 12px;font-weight: 800;letter-spacing: 2px;margin: 0 0 9px;text-transform: uppercase;">Featured This Week &nbsp;•&nbsp; ${featured_kind}</p>
+                                        <h1 class="camcore-featured-title" style="color: #FFFFFF;font-family: 'Open Sans', Helvetica, Arial, sans-serif;font-size: 34px;font-weight: 800;letter-spacing: -0.7px;line-height: 1.08;margin: 0 0 12px;">${featured['title']}</h1>
+                                        <p class="camcore-featured-meta" style="color: #C0CDD6;font-size: 13px;font-weight: 700;line-height: 1.6;margin: 0 0 13px;">
+                                            % if featured.get('year'):
+                                            ${featured['year']}
                                             % endif
-                                            <a class="camcore-watch-button" href="${parameters['pms_web_url']}#!/server/${parameters['pms_identifier']}/details?key=%2Flibrary%2Fmetadata%2F${featured['rating_key']}" title="Watch ${featured['title']} on Cameron-Media" target="_blank" rel="noreferrer" style="background: __TEAL__;border-radius: 8px;color: #FFFFFF;display: inline-block;font-size: 14px;font-weight: 800;padding: 12px 22px;text-decoration: none;">Watch on Cameron-Media</a>
-                                        </div>
+                                            % if featured.get('duration'):
+                                            <% featured_duration = int(int(featured['duration']) / 60000) %>
+                                            &nbsp;•&nbsp; ${featured_duration} min
+                                            % endif
+                                            % if featured.get('genres'):
+                                            &nbsp;•&nbsp; ${' / '.join(featured['genres'][:2])}
+                                            % endif
+                                            % if featured.get('rating') or featured.get('audience_rating'):
+                                            <% featured_score = int(float(featured.get('rating') or featured.get('audience_rating')) * 10) %>
+                                            &nbsp;•&nbsp; ${featured_score}% rating
+                                            % endif
+                                        </p>
+                                        % if featured.get('summary'):
+                                        <p class="camcore-featured-summary" style="color: #D9E2E8;font-size: 15px;line-height: 1.55;margin: 0 0 20px;max-width: 620px;">${featured['summary'][:260] + (featured['summary'][260:] and '...')}</p>
+                                        % endif
+                                        <a class="camcore-watch-button" href="${parameters['pms_web_url']}#!/server/${parameters['pms_identifier']}/details?key=%2Flibrary%2Fmetadata%2F${featured['rating_key']}" title="Watch ${featured['title']} on Cameron-Media" target="_blank" rel="noreferrer" style="background: __TEAL__;border-radius: 8px;color: #FFFFFF;display: inline-block;font-size: 14px;font-weight: 800;padding: 12px 22px;text-decoration: none;">Watch on Cameron-Media</a>
                                     </td>
                                 </tr>
                             </table>
@@ -245,6 +265,11 @@ for newsletter_name in ("recently_added.html", "recently_added.internal.html"):
         if section_marker not in newsletter:
             raise SystemExit(f"Unable to add featured title to {newsletter_name}")
         newsletter = newsletter.replace(section_marker, FEATURED_BLOCK + section_marker, 1)
+
+    newsletter = newsletter.replace(
+        "${message if '<' in message and '>' in message else '<br>'.join(l for l in message.splitlines()) | n}",
+        "${message.replace('```', '') if '<' in message and '>' in message else '<br>'.join(l for l in message.replace('```', '').splitlines()) | n}",
+    )
 
     newsletter = newsletter.replace(
         "${movie['summary'][:450] + (movie['summary'][450:] and '...')}",
