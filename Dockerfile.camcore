@@ -5,17 +5,26 @@ FROM lscr.io/linuxserver/tautulli:latest
 USER root
 
 LABEL org.opencontainers.image.title="CamCore Media Insights" \
-      org.opencontainers.image.description="CamCore-branded Tautulli monitoring, analytics and newsletter interface" \
+      org.opencontainers.image.description="CamCore-branded Tautulli monitoring, analytics, notifications and newsletter interface" \
       org.opencontainers.image.source="https://github.com/camcoreau/tautulli"
 
-# The dark logo is for Tautulli's dark UI and dark newsletter background.
-# The light logo is packaged for any future light-background surface.
+# The dark logo is used by Tautulli's dark UI, newsletter and embedded
+# operational-email header. The light logo remains available for light surfaces.
 COPY camcore-branding/camcore-logo-dark.png /app/tautulli/data/interfaces/default/images/camcore-logo-dark.png
 COPY camcore-branding/camcore-logo-light.png /app/tautulli/data/interfaces/default/images/camcore-logo-light.png
 COPY camcore-branding/camcore-icon.svg /app/tautulli/data/interfaces/default/images/favicon/camcore-icon.svg
 COPY camcore-branding/apply_branding.py /tmp/apply_camcore_branding.py
 COPY camcore-branding/apply_streaming_newsletter.py /tmp/apply_streaming_newsletter.py
+COPY camcore-branding/apply_notifications.py /tmp/apply_notifications.py
 
 RUN python3 /tmp/apply_camcore_branding.py && \
     python3 /tmp/apply_streaming_newsletter.py && \
-    rm -f /tmp/apply_camcore_branding.py /tmp/apply_streaming_newsletter.py
+    python3 /tmp/apply_notifications.py && \
+    python3 -m py_compile \
+      /app/tautulli/plexpy/notifiers.py \
+      /app/tautulli/plexpy/newsletters.py \
+      /app/tautulli/plexpy/notification_handler.py && \
+    rm -f \
+      /tmp/apply_camcore_branding.py \
+      /tmp/apply_streaming_newsletter.py \
+      /tmp/apply_notifications.py

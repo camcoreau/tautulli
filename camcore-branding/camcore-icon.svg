@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 210 210" role="img" aria-labelledby="title">
+  <title id="title">CamCore</title>
+  <defs>
+    <linearGradient id="cyan" x1="30" y1="25" x2="190" y2="190" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#18D7F2"/>
+      <stop offset="1" stop-color="#0096C7"/>
+    </linearGradient>
+    <linearGradient id="white" x1="20" y1="15" x2="175" y2="170" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#DCEBFF"/>
+    </linearGradient>
+  </defs>
+  <path d="M105 12 190 44v48c0 21-3 40-12 58" fill="none" stroke="url(#white)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M32 150c-9-18-12-37-12-58V44l85-32" fill="none" stroke="url(#white)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M52 118V82l53-41 53 41v36M145 72V50h18v36" fill="none" stroke="url(#white)" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="91" y="82" width="12" height="12" rx="1.5" fill="#FFFFFF"/>
+  <rect x="108" y="82" width="12" height="12" rx="1.5" fill="#FFFFFF"/>
+  <rect x="91" y="99" width="12" height="12" rx="1.5" fill="#FFFFFF"/>
+  <rect x="108" y="99" width="12" height="12" rx="1.5" fill="#FFFFFF"/>
+  <path d="M40 143h130M105 143v45" fill="none" stroke="url(#cyan)" stroke-width="10" stroke-linecap="round"/>
+  <circle cx="40" cy="143" r="16" fill="#06111F" stroke="url(#cyan)" stroke-width="9"/>
+  <circle cx="170" cy="143" r="16" fill="#06111F" stroke="url(#cyan)" stroke-width="9"/>
+  <circle cx="105" cy="143" r="18" fill="url(#cyan)"/>
+  <circle cx="105" cy="188" r="16" fill="#06111F" stroke="url(#cyan)" stroke-width="9"/>
+  <path d="M57 169c14 12 29 20 48 27 19-7 34-15 48-27" fill="none" stroke="url(#white)" stroke-width="10" stroke-linecap="round"/>
+</svg>

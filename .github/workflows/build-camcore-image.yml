@@ -1,36 +1,79 @@
-name: Build CamCore Tautulli image
+name: CamCore Tautulli Image
 
 on:
   push:
     branches:
       - master
+      - 'agent/**'
+    paths-ignore:
+      - '**/*.md'
   workflow_dispatch:
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 concurrency:
-  group: camcore-tautulli-image
+  group: camcore-tautulli-image-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/tautulli
+  IMAGE_NAME: ghcr.io/camcoreau/tautulli
 
 jobs:
-  build:
-    name: Build and publish CamCore image
-    runs-on: ubuntu-latest
+  validate:
+    name: Validate CamCore downstream
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Validate Python patch scripts
+        run: |
+          python3 -m py_compile \
+            camcore-branding/apply_branding.py \
+            camcore-branding/apply_streaming_newsletter.py \
+            camcore-branding/apply_notifications.py
+
+      - name: Apply notification patch to upstream source
+        env:
+          CAMCORE_TAUTULLI_ROOT: ${{ github.workspace }}
+        run: |
+          python3 camcore-branding/apply_notifications.py
+          python3 -m py_compile \
+            plexpy/notifiers.py \
+            plexpy/newsletters.py \
+            plexpy/notification_handler.py
+
+      - name: Verify CamCore notification standards
+        run: |
+          grep -F "Insights | CamCore Media" plexpy/notifiers.py
+          grep -F "Updates | CamCore Media" plexpy/newsletters.py
+          grep -F "Cameron-Media is unavailable" plexpy/notifiers.py
+          grep -F "What's new on Cameron-Media" plexpy/newsletters.py
+          grep -F "CAMCORE MEDIA • INSIGHTS" plexpy/notifiers.py
+
+  build-and-publish:
+    name: Build and publish AMD64 image
+    if: github.ref == 'refs/heads/master'
+    needs: validate
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
 
       - name: Prepare exact CamCore artwork
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p camcore-branding/generated
 
           cat camcore-branding/dark-logo.b64.* \
             | tr -d '\r\n' \
@@ -45,56 +88,39 @@ jobs:
           echo "58d436201eff1ed379c8f3a1bfb818ef403fee75d188a8a6d478df65646232af  camcore-branding/camcore-logo-dark.png" | sha256sum --check
           echo "9a8f29b247fcdfd670c58f48b7aa760e157fa8e042b8f8ffd9164c1bfa03fff0  camcore-branding/camcore-logo-light.png" | sha256sum --check
 
-          cp camcore-branding/camcore-logo-dark.png camcore-branding/generated/camcore-logo-dark.png
-          cp camcore-branding/camcore-logo-light.png camcore-branding/generated/camcore-logo-light.png
-
-          curl --retry 3 --fail --silent --show-error --location \
-            "https://raw.githubusercontent.com/camcoreau/Seerr/develop/public/os_icon.svg" \
-            --output camcore-branding/camcore-icon.svg
-
-      - name: Publish newsletter logo assets
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add camcore-branding/generated/camcore-logo-dark.png camcore-branding/generated/camcore-logo-light.png
-
-          if ! git diff --cached --quiet; then
-            git commit -m "Publish approved CamCore logo assets [skip ci]"
-            git push
-          fi
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
+          username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Generate image metadata
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest
-            type=sha,prefix=sha-
+            type=raw,value=camcore
+            type=sha,prefix=master-
+          labels: |
+            org.opencontainers.image.title=CamCore Media Insights
+            org.opencontainers.image.description=CamCore-branded Tautulli monitoring, analytics, notifications and newsletters for Cameron-Media
+            org.opencontainers.image.source=https://github.com/camcoreau/tautulli
 
-      - name: Build and push image
-        uses: docker/build-push-action@v7
+      - name: Build and publish image
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: .
           file: ./Dockerfile.camcore
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=camcore-tautulli-amd64
+          cache-to: type=gha,mode=max,scope=camcore-tautulli-amd64
+          provenance: false
