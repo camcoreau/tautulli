@@ -88,12 +88,12 @@ EVENT_LABELS = {
     "plexpydbcorrupt": "DATABASE ALERT",
     "tokenexpired": "AUTHENTICATION ALERT",
     "test": "TEST NOTIFICATION",
+    "api": "MEDIA INSIGHTS",
 }
 
 
 notifiers_path = ROOT / "plexpy" / "notifiers.py"
 notifiers = notifiers_path.read_text(encoding="utf-8-sig")
-
 notifiers = replace_text_once(
     notifiers,
     "from email.mime.multipart import MIMEMultipart\nfrom email.mime.text import MIMEText\nimport email.utils\n",
@@ -102,46 +102,131 @@ notifiers = replace_text_once(
 )
 
 constants_marker = "DEFAULT_CUSTOM_CONDITIONS = [{'parameter': '', 'operator': '', 'value': [], 'type': None}]\n"
-constants_block = constants_marker + f'''\nCAMCORE_EMAIL_LOGO_CID = 'camcore-media-insights-logo'\nCAMCORE_EMAIL_LOGO_PATH = os.path.join(plexpy.PROG_DIR, 'data', 'interfaces', 'default', 'images', 'camcore-logo-dark.png')\nCAMCORE_EMAIL_DEFAULTS = {CAMCORE_ACTION_TEXT!r}\nCAMCORE_EMAIL_LEGACY_DEFAULTS = {LEGACY_ACTION_TEXT!r}\nCAMCORE_EMAIL_EVENT_LABELS = {EVENT_LABELS!r}\n\ndef _camcore_effective_sender_name(from_name):\n    if from_name in ('', 'Tautulli'):\n        return 'Insights | CamCore Media'\n    if from_name == 'Tautulli Newsletter':\n        return 'Updates | CamCore Media'\n    return from_name\n\ndef _camcore_notification_html(subject, body, action):\n    subject_html = html_lib.escape(subject or 'CamCore Media Insights notification')\n    body_html = body if '<' in body and '>' in body else html_lib.escape(body or '').replace('\\n', '<br>')\n    event_label = CAMCORE_EMAIL_EVENT_LABELS.get(action, 'MEDIA INSIGHTS')\n    application_url = helpers.get_plexpy_url() or ''\n    button_html = ''\n    if application_url:\n        escaped_url = html_lib.escape(application_url, quote=True)\n        button_html = f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0 0;"><tr><td bgcolor="#11bdd4" style="border-radius:7px;"><a href="{{escaped_url}}" style="display:inline-block;padding:13px 20px;color:#05202a;font-size:15px;line-height:20px;font-weight:700;text-decoration:none;border-radius:7px;">Open Media Insights</a></td></tr></table>'\n    if os.path.exists(CAMCORE_EMAIL_LOGO_PATH):\n        brand_html = f'<img src="cid:{{CAMCORE_EMAIL_LOGO_CID}}" alt="CamCore — Cameron Family Secure Network" width="310" style="display:block;width:310px;max-width:100%;height:auto;">'\n    else:\n        brand_html = '<div style="color:#ffffff;font-size:32px;font-weight:800;">CamCore</div>'\n    return f'''<!doctype html><html lang="en-AU"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;padding:0;background:#edf3f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#10212b;"><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#edf3f6;width:100%;"><tr><td align="center" style="padding:34px 12px;"><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="640" style="width:640px;max-width:640px;margin:0 auto;"><tr><td style="padding:22px 32px 18px;background:#071827;border-radius:12px 12px 0 0;">{{brand_html}}<div style="margin-top:14px;color:#a9bbc6;font-size:10px;line-height:15px;font-weight:700;letter-spacing:1.8px;">CAMCORE MEDIA • INSIGHTS</div></td></tr><tr><td style="height:4px;line-height:4px;font-size:0;background:#12c4de;">&nbsp;</td></tr><tr><td style="padding:36px 32px 32px;background:#ffffff;"><table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 16px;"><tr><td style="padding:5px 10px;background:#eefbfd;border:1px solid #b8e8ef;border-radius:999px;color:#0d879b;font-size:10px;line-height:13px;font-weight:800;letter-spacing:1.2px;">{{event_label}}</td></tr></table><h1 style="margin:0;color:#071827;font-size:31px;line-height:38px;font-weight:800;letter-spacing:-0.55px;">{{subject_html}}</h1><p style="margin:18px 0 0;color:#435562;font-size:15px;line-height:24px;">{{body_html}}</p><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:24px 0 0;"><tr><td style="padding:18px 20px;background:#f1f6f8;border:1px solid #d8e4e9;border-radius:9px;color:#10212b;"><div style="margin:0 0 8px;color:#718391;font-size:10px;line-height:14px;font-weight:750;letter-spacing:1.4px;">MONITORING SERVICE</div><div style="color:#071827;font-size:15px;line-height:22px;font-weight:750;">CamCore Media Insights</div><div style="margin-top:5px;color:#526572;font-size:13px;line-height:20px;">Monitoring and analytics for Cameron-Media.</div></td></tr></table>{{button_html}}</td></tr><tr><td style="padding:24px 32px 26px;background:#f8fafb;border-top:1px solid #e2eaee;border-radius:0 0 12px 12px;text-align:center;"><div style="color:#10212b;font-size:13px;line-height:18px;font-weight:750;">CamCore Media Insights</div><div style="margin-top:2px;color:#718391;font-size:11px;line-height:16px;">Cameron Family Secure Network</div><div style="margin-top:12px;font-size:12px;line-height:19px;"><a href="https://plex.camcore.au/" style="color:#0d879b;font-weight:650;text-decoration:none;">Cameron-Media</a>&nbsp;&nbsp;•&nbsp;&nbsp;<a href="https://status.camcore.au/" style="color:#0d879b;font-weight:650;text-decoration:none;">Service Status</a>&nbsp;&nbsp;•&nbsp;&nbsp;<a href="https://camcore.au/support.html" style="color:#0d879b;font-weight:650;text-decoration:none;">CamCore Support</a></div><div style="margin-top:4px;font-size:12px;line-height:18px;"><a href="mailto:help@camcore.au" style="color:#0d879b;font-weight:650;text-decoration:none;">help@camcore.au</a></div></td></tr></table></td></tr></table></body></html>'''\n\n'''
-notifiers = replace_text_once(notifiers, constants_marker, constants_block, "CamCore email constants")
+constants_block = constants_marker + f"""
+CAMCORE_EMAIL_LOGO_CID = 'camcore-media-insights-logo'
+CAMCORE_EMAIL_LOGO_PATH = os.path.join(plexpy.PROG_DIR, 'data', 'interfaces', 'default', 'images', 'camcore-logo-dark.png')
+CAMCORE_EMAIL_DEFAULTS = {CAMCORE_ACTION_TEXT!r}
+CAMCORE_EMAIL_LEGACY_DEFAULTS = {LEGACY_ACTION_TEXT!r}
+CAMCORE_EMAIL_EVENT_LABELS = {EVENT_LABELS!r}
 
-for action, legacy in LEGACY_ACTION_TEXT.items():
-    subject_old, body_old = legacy
-    subject_new, body_new = CAMCORE_ACTION_TEXT[action]
-    marker = f"'name': '{action}',"
-    action_pos = notifiers.find(marker)
-    if action_pos == -1:
-        raise SystemExit(f"Unable to locate notification action {action}")
-    next_pos = notifiers.find("'name': 'on_", action_pos + len(marker))
-    if next_pos == -1:
-        next_pos = notifiers.find("\n               ]", action_pos)
-    block = notifiers[action_pos:next_pos]
-    old_subject_line = f"'subject': {subject_old!r},"
-    old_body_line = f"'body': {body_old!r},"
-    if old_subject_line not in block or old_body_line not in block:
-        raise SystemExit(f"Unable to patch CamCore defaults for {action}")
-    block = block.replace(old_subject_line, f"'subject': {subject_new!r},", 1)
-    block = block.replace(old_body_line, f"'body': {body_new!r},", 1)
-    notifiers = notifiers[:action_pos] + block + notifiers[next_pos:]
+
+def _camcore_effective_sender_name(from_name):
+    if from_name in ('', 'Tautulli'):
+        return 'Insights | CamCore Media'
+    if from_name == 'Tautulli Newsletter':
+        return 'Updates | CamCore Media'
+    return from_name
+
+
+def _camcore_notification_html(subject, body, action):
+    subject_html = html_lib.escape(subject or 'CamCore Media Insights notification')
+    body_html = body if '<' in body and '>' in body else html_lib.escape(body or '').replace('\\n', '<br>')
+    event_label = CAMCORE_EMAIL_EVENT_LABELS.get(action, 'MEDIA INSIGHTS')
+    application_url = helpers.get_plexpy_url() or ''
+    button_html = ''
+    if application_url:
+        escaped_url = html_lib.escape(application_url, quote=True)
+        button_html = f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0 0;"><tr><td bgcolor="#11bdd4" style="border-radius:7px;"><a href="{{escaped_url}}" style="display:inline-block;padding:13px 20px;color:#05202a;font-size:15px;line-height:20px;font-weight:700;text-decoration:none;border-radius:7px;">Open Media Insights</a></td></tr></table>'
+    if os.path.exists(CAMCORE_EMAIL_LOGO_PATH):
+        brand_html = f'<img src="cid:{{CAMCORE_EMAIL_LOGO_CID}}" alt="CamCore — Cameron Family Secure Network" width="310" style="display:block;width:310px;max-width:100%;height:auto;">'
+    else:
+        brand_html = '<div style="color:#ffffff;font-size:32px;font-weight:800;">CamCore</div>'
+    return f'''<!doctype html><html lang="en-AU"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;padding:0;background:#edf3f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#10212b;"><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#edf3f6;width:100%;"><tr><td align="center" style="padding:34px 12px;"><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="640" style="width:640px;max-width:640px;margin:0 auto;"><tr><td style="padding:22px 32px 18px;background:#071827;border-radius:12px 12px 0 0;">{{brand_html}}<div style="margin-top:14px;color:#a9bbc6;font-size:10px;line-height:15px;font-weight:700;letter-spacing:1.8px;">CAMCORE MEDIA • INSIGHTS</div></td></tr><tr><td style="height:4px;line-height:4px;font-size:0;background:#12c4de;">&nbsp;</td></tr><tr><td style="padding:36px 32px 32px;background:#ffffff;"><table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 16px;"><tr><td style="padding:5px 10px;background:#eefbfd;border:1px solid #b8e8ef;border-radius:999px;color:#0d879b;font-size:10px;line-height:13px;font-weight:800;letter-spacing:1.2px;">{{event_label}}</td></tr></table><h1 style="margin:0;color:#071827;font-size:31px;line-height:38px;font-weight:800;letter-spacing:-0.55px;">{{subject_html}}</h1><p style="margin:18px 0 0;color:#435562;font-size:15px;line-height:24px;">{{body_html}}</p><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:24px 0 0;"><tr><td style="padding:18px 20px;background:#f1f6f8;border:1px solid #d8e4e9;border-radius:9px;color:#10212b;"><div style="margin:0 0 8px;color:#718391;font-size:10px;line-height:14px;font-weight:750;letter-spacing:1.4px;">MONITORING SERVICE</div><div style="color:#071827;font-size:15px;line-height:22px;font-weight:750;">CamCore Media Insights</div><div style="margin-top:5px;color:#526572;font-size:13px;line-height:20px;">Monitoring and analytics for Cameron-Media.</div></td></tr></table>{{button_html}}</td></tr><tr><td style="padding:24px 32px 26px;background:#f8fafb;border-top:1px solid #e2eaee;border-radius:0 0 12px 12px;text-align:center;"><div style="color:#10212b;font-size:13px;line-height:18px;font-weight:750;">CamCore Media Insights</div><div style="margin-top:2px;color:#718391;font-size:11px;line-height:16px;">Cameron Family Secure Network</div><div style="margin-top:12px;font-size:12px;line-height:19px;"><a href="https://plex.camcore.au/" style="color:#0d879b;font-weight:650;text-decoration:none;">Cameron-Media</a>&nbsp;&nbsp;•&nbsp;&nbsp;<a href="https://status.camcore.au/" style="color:#0d879b;font-weight:650;text-decoration:none;">Service Status</a>&nbsp;&nbsp;•&nbsp;&nbsp;<a href="https://camcore.au/support.html" style="color:#0d879b;font-weight:650;text-decoration:none;">CamCore Support</a></div><div style="margin-top:4px;font-size:12px;line-height:18px;"><a href="mailto:help@camcore.au" style="color:#0d879b;font-weight:650;text-decoration:none;">help@camcore.au</a></div></td></tr></table></td></tr></table></body></html>'''
+
+"""
+notifiers = replace_text_once(notifiers, constants_marker, constants_block, "CamCore email constants")
 
 notifiers = replace_text_once(
     notifiers,
-    '''            if body is None:\n                body = "" if result['agent_name'] in ('scripts', 'webhook') else notify_actions[k]['body']\n\n            notifier_actions[k] = helpers.cast_to_int(result.pop(k))\n''',
-    '''            if body is None:\n                body = "" if result['agent_name'] in ('scripts', 'webhook') else notify_actions[k]['body']\n\n            if result['agent_name'] == 'email' and k in CAMCORE_EMAIL_DEFAULTS:\n                legacy_subject, legacy_body = CAMCORE_EMAIL_LEGACY_DEFAULTS[k]\n                camcore_subject, camcore_body = CAMCORE_EMAIL_DEFAULTS[k]\n                if subject == legacy_subject:\n                    subject = camcore_subject\n                if body == legacy_body:\n                    body = camcore_body\n\n            notifier_actions[k] = helpers.cast_to_int(result.pop(k))\n''',
+    '''            if body is None:
+                body = "" if result['agent_name'] in ('scripts', 'webhook') else notify_actions[k]['body']
+
+            notifier_actions[k] = helpers.cast_to_int(result.pop(k))
+''',
+    '''            if body is None:
+                body = "" if result['agent_name'] in ('scripts', 'webhook') else notify_actions[k]['body']
+
+            if result['agent_name'] == 'email' and k in CAMCORE_EMAIL_DEFAULTS:
+                legacy_subject, legacy_body = CAMCORE_EMAIL_LEGACY_DEFAULTS[k]
+                camcore_subject, camcore_body = CAMCORE_EMAIL_DEFAULTS[k]
+                if subject == legacy_subject:
+                    subject = camcore_subject
+                if body == legacy_body:
+                    body = camcore_body
+
+            notifier_actions[k] = helpers.cast_to_int(result.pop(k))
+''',
     "legacy email default upgrade",
 )
 
 notifiers = replace_text_once(
     notifiers,
-    '''        if self.config['html_support']:\n            plain = MIMEText(None, 'plain', 'utf-8')\n            plain.replace_header('Content-Transfer-Encoding', 'quoted-printable')\n            plain.set_payload(kwargs.get('plaintext', bleach.clean(body, strip=True)), 'utf-8')\n\n            html = MIMEText(body, 'html', 'utf-8')\n\n            msg = MIMEMultipart('alternative')\n            msg.attach(plain)\n            msg.attach(html)\n        else:\n            msg = MIMEText(None, 'plain', 'utf-8')\n            msg.replace_header('Content-Transfer-Encoding', 'quoted-printable')\n            msg.set_payload(body, 'utf-8')\n''',
-    '''        if self.config['html_support']:\n            plaintext_body = kwargs.get('plaintext', bleach.clean(body, strip=True))\n            if action:\n                body = _camcore_notification_html(subject, body, action)\n\n            plain = MIMEText(None, 'plain', 'utf-8')\n            plain.replace_header('Content-Transfer-Encoding', 'quoted-printable')\n            plain.set_payload(plaintext_body, 'utf-8')\n\n            html = MIMEText(body, 'html', 'utf-8')\n            alternative = MIMEMultipart('alternative')\n            alternative.attach(plain)\n            alternative.attach(html)\n\n            if action and os.path.exists(CAMCORE_EMAIL_LOGO_PATH):\n                msg = MIMEMultipart('related')\n                msg.attach(alternative)\n                with open(CAMCORE_EMAIL_LOGO_PATH, 'rb') as logo_file:\n                    logo = MIMEImage(logo_file.read(), _subtype='png')\n                logo.add_header('Content-ID', '<{}>'.format(CAMCORE_EMAIL_LOGO_CID))\n                logo.add_header('Content-Disposition', 'inline', filename='camcore-logo.png')\n                msg.attach(logo)\n            else:\n                msg = alternative\n        else:\n            msg = MIMEText(None, 'plain', 'utf-8')\n            msg.replace_header('Content-Transfer-Encoding', 'quoted-printable')\n            msg.set_payload(body, 'utf-8')\n''',
+    '''        if self.config['html_support']:
+            plain = MIMEText(None, 'plain', 'utf-8')
+            plain.replace_header('Content-Transfer-Encoding', 'quoted-printable')
+            plain.set_payload(kwargs.get('plaintext', bleach.clean(body, strip=True)), 'utf-8')
+
+            html = MIMEText(body, 'html', 'utf-8')
+
+            msg = MIMEMultipart('alternative')
+            msg.attach(plain)
+            msg.attach(html)
+        else:
+            msg = MIMEText(None, 'plain', 'utf-8')
+            msg.replace_header('Content-Transfer-Encoding', 'quoted-printable')
+            msg.set_payload(body, 'utf-8')
+''',
+    '''        if action in ('test', 'api'):
+            if subject == 'Tautulli':
+                subject = 'CamCore Media Insights test notification'
+            if body == 'Test Notification':
+                body = 'This test confirms that CamCore Media Insights can deliver notifications successfully.'
+
+        if self.config['html_support']:
+            plaintext_body = kwargs.get('plaintext', bleach.clean(body, strip=True))
+            if action:
+                body = _camcore_notification_html(subject, body, action)
+
+            plain = MIMEText(None, 'plain', 'utf-8')
+            plain.replace_header('Content-Transfer-Encoding', 'quoted-printable')
+            plain.set_payload(plaintext_body, 'utf-8')
+
+            html = MIMEText(body, 'html', 'utf-8')
+            alternative = MIMEMultipart('alternative')
+            alternative.attach(plain)
+            alternative.attach(html)
+
+            if action and os.path.exists(CAMCORE_EMAIL_LOGO_PATH):
+                msg = MIMEMultipart('related')
+                msg.attach(alternative)
+                with open(CAMCORE_EMAIL_LOGO_PATH, 'rb') as logo_file:
+                    logo = MIMEImage(logo_file.read(), _subtype='png')
+                logo.add_header('Content-ID', '<{}>'.format(CAMCORE_EMAIL_LOGO_CID))
+                logo.add_header('Content-Disposition', 'inline', filename='camcore-logo.png')
+                msg.attach(logo)
+            else:
+                msg = alternative
+        else:
+            msg = MIMEText(None, 'plain', 'utf-8')
+            msg.replace_header('Content-Transfer-Encoding', 'quoted-printable')
+            msg.set_payload(body, 'utf-8')
+''',
     "HTML email renderer",
 )
 
 notifiers = replace_text_once(
     notifiers,
-    '''        msg['Subject'] = subject\n        msg['From'] = email.utils.formataddr((self.config['from_name'], self.config['from']))\n        msg['To'] = ','.join(self.config['to'])\n''',
-    '''        msg['Subject'] = subject\n        sender_name = _camcore_effective_sender_name(self.config['from_name'])\n        msg['From'] = email.utils.formataddr((sender_name, self.config['from']))\n        if self.config['from']:\n            msg['Reply-To'] = self.config['from']\n        msg['To'] = ','.join(self.config['to'])\n''',
+    '''        msg['Subject'] = subject
+        msg['From'] = email.utils.formataddr((self.config['from_name'], self.config['from']))
+        msg['To'] = ','.join(self.config['to'])
+''',
+    '''        msg['Subject'] = subject
+        sender_name = _camcore_effective_sender_name(self.config['from_name'])
+        msg['From'] = email.utils.formataddr((sender_name, self.config['from']))
+        if self.config['from']:
+            msg['Reply-To'] = self.config['from']
+        msg['To'] = ','.join(self.config['to'])
+''',
     "CamCore sender identity",
 )
 
@@ -153,27 +238,59 @@ notifiers = replace_text_once(
 )
 notifiers_path.write_text(notifiers, encoding="utf-8")
 
-handler_path = ROOT / "plexpy" / "notification_handler.py"
-handler = handler_path.read_text(encoding="utf-8-sig")
-handler = replace_text_once(
-    handler,
-    '''    if notify_action in ('test', 'api'):\n        subject = kwargs.pop('subject', 'Tautulli')\n        body = kwargs.pop('body', 'Test Notification')\n''',
-    '''    if notify_action in ('test', 'api'):\n        subject = kwargs.pop('subject', 'CamCore Media Insights test notification')\n        body = kwargs.pop('body', 'This test confirms that CamCore Media Insights can deliver notifications successfully.')\n''',
-    "test notification defaults",
-)
-handler_path.write_text(handler, encoding="utf-8")
 
 newsletters_path = ROOT / "plexpy" / "newsletters.py"
 newsletters = newsletters_path.read_text(encoding="utf-8-sig")
-newsletters = replace_text_once(newsletters, "_DEFAULT_EMAIL_CONFIG['from_name'] = 'Tautulli Newsletter'", "_DEFAULT_EMAIL_CONFIG['from_name'] = 'Updates | CamCore Media'", "newsletter sender name")
-newsletters = replace_text_once(newsletters, "_DEFAULT_SUBJECT = 'Tautulli Newsletter'\n    _DEFAULT_BODY = 'View the newsletter here: {newsletter_url}'", "_DEFAULT_SUBJECT = \"What's new on Cameron-Media — {end_date}\"\n    _DEFAULT_BODY = 'View this Cameron-Media update in your browser: {newsletter_url}'", "base newsletter defaults")
-newsletters = replace_text_once(newsletters, "_DEFAULT_SUBJECT = 'Recently Added to {server_name}! ({end_date})'\n    _DEFAULT_BODY = 'View the newsletter here: {newsletter_url}'", "_DEFAULT_SUBJECT = \"What's new on Cameron-Media — {end_date}\"\n    _DEFAULT_BODY = 'View this Cameron-Media update in your browser: {newsletter_url}'", "recently added newsletter defaults")
 newsletters = replace_text_once(
     newsletters,
-    '''        self.subject = subject or self._DEFAULT_SUBJECT\n        self.body = body or self._DEFAULT_BODY\n        self.message = message or self._DEFAULT_MESSAGE\n''',
-    '''        self.subject = subject or self._DEFAULT_SUBJECT\n        self.body = body or self._DEFAULT_BODY\n        self.message = message or self._DEFAULT_MESSAGE\n\n        if self.subject in ('Tautulli Newsletter', 'Recently Added to {server_name}! ({end_date})'):\n            self.subject = \"What's new on Cameron-Media — {end_date}\"\n        if self.body == 'View the newsletter here: {newsletter_url}':\n            self.body = 'View this Cameron-Media update in your browser: {newsletter_url}'\n        if self.email_config.get('from_name') == 'Tautulli Newsletter':\n            self.email_config['from_name'] = 'Updates | CamCore Media'\n''',
+    "_DEFAULT_EMAIL_CONFIG['from_name'] = 'Tautulli Newsletter'",
+    "_DEFAULT_EMAIL_CONFIG['from_name'] = 'Updates | CamCore Media'",
+    "newsletter sender name",
+)
+newsletters = replace_text_once(
+    newsletters,
+    "_DEFAULT_SUBJECT = 'Tautulli Newsletter'\n    _DEFAULT_BODY = 'View the newsletter here: {newsletter_url}'",
+    "_DEFAULT_SUBJECT = \"What's new on Cameron-Media — {end_date}\"\n    _DEFAULT_BODY = 'View this Cameron-Media update in your browser: {newsletter_url}'",
+    "base newsletter defaults",
+)
+newsletters = replace_text_once(
+    newsletters,
+    "_DEFAULT_SUBJECT = 'Recently Added to {server_name}! ({end_date})'\n    _DEFAULT_BODY = 'View the newsletter here: {newsletter_url}'",
+    "_DEFAULT_SUBJECT = \"What's new on Cameron-Media — {end_date}\"\n    _DEFAULT_BODY = 'View this Cameron-Media update in your browser: {newsletter_url}'",
+    "recently added newsletter defaults",
+)
+newsletters = replace_text_once(
+    newsletters,
+    '''        self.subject = subject or self._DEFAULT_SUBJECT
+        self.body = body or self._DEFAULT_BODY
+        self.message = message or self._DEFAULT_MESSAGE
+''',
+    '''        self.subject = subject or self._DEFAULT_SUBJECT
+        self.body = body or self._DEFAULT_BODY
+        self.message = message or self._DEFAULT_MESSAGE
+
+        if self.subject in ('Tautulli Newsletter', 'Recently Added to {server_name}! ({end_date})'):
+            self.subject = "What's new on Cameron-Media — {end_date}"
+        if self.body == 'View the newsletter here: {newsletter_url}':
+            self.body = 'View this Cameron-Media update in your browser: {newsletter_url}'
+        if self.email_config.get('from_name') == 'Tautulli Newsletter':
+            self.email_config['from_name'] = 'Updates | CamCore Media'
+''',
     "legacy newsletter defaults",
 )
 newsletters_path.write_text(newsletters, encoding="utf-8")
+
+# The existing CamCore branding script adds the visible weekly-update title. Keep
+# the hidden/preheader title from repeating the same phrase once the subject is
+# also CamCore-standardised.
+for template_name in ("recently_added.html", "recently_added.internal.html"):
+    template_path = ROOT / "data" / "interfaces" / "newsletters" / template_name
+    if template_path.exists():
+        template = template_path.read_text(encoding="utf-8-sig")
+        template = template.replace(
+            "New this week on Cameron-Media — ${subject}",
+            "${subject}",
+        )
+        template_path.write_text(template, encoding="utf-8")
 
 print("CamCore Media Insights notification and newsletter standards applied.")
