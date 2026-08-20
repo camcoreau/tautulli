@@ -1,163 +1,142 @@
-# Tautulli
+# CamCore Media Insights
 
-A python based web application for monitoring, analytics and notifications for 
-[Plex Media Server](https://plex.tv).
+CamCore-maintained downstream of [Tautulli](https://github.com/Tautulli/Tautulli) for monitoring, analytics, notifications and weekly Cameron-Media updates.
 
-This project is based on code from [Headphones](https://github.com/rembo10/headphones)
-and [PlexWatchWeb](https://github.com/ecleese/plexWatchWeb).
+The CamCore image keeps Tautulli's upstream functionality while applying CamCore visual identity, notification wording, sender standards, newsletter presentation and a controlled GHCR release workflow.
 
-## Features
+## CamCore service identity
 
--   Responsive web design viewable on desktop, tablet and mobile web browsers.
--   Themed to complement Plex/Web.
--   Easy configuration setup (no separate web server required).
--   Monitor current Plex Media Server activity.
--   Fully customizable notifications for stream activity and recently added media.
--   Top statistics on home page with configurable duration and measurement metric.
--   Global watching history with search/filtering & dynamic column sorting.
--   Full user list with general information and comparison stats.
--   Individual user information including devices IP addresses.
--   Complete library statistics and media file information.
--   Rich analytics presented using Highcharts graphing.
--   Beautiful content information pages.
--   Full sync list data on all users syncing items from your library.
--   And many more!!
+| Surface | CamCore identity |
+| --- | --- |
+| Application | `CamCore Media Insights` |
+| Purpose | Monitoring and analytics for Cameron-Media |
+| Container | `ghcr.io/camcoreau/tautulli` |
+| Operational email sender | `Insights | CamCore Media <help@camcore.au>` |
+| Newsletter sender | `Updates | CamCore Media <help@camcore.au>` |
+| Cameron-Media | `https://plex.camcore.au` |
+| Requests | `https://requests.camcore.au` |
+| Service status | `https://status.camcore.au` |
+| Support | `https://camcore.au/support.html` |
 
-## Preview
+## CamCore customisation
 
-[Full preview gallery available on our website][Tautulli]
+The downstream layer includes:
 
-![Tautulli Homepage](https://tautulli.com/images/screenshots/activity-compressed.jpg?v=2)
+- CamCore Media Insights browser, navigation, login and favicon branding;
+- CamCore-branded newsletter authentication pages;
+- Cameron-Media weekly update/newsletter presentation;
+- a featured weekly media catalogue and responsive Outlook-friendly layout;
+- CamCore operational email subjects and content;
+- embedded CamCore artwork in operational email notifications;
+- CamCore sender identities for alerts and newsletters;
+- transparent migration of untouched upstream Tautulli notification defaults;
+- a validation-gated GHCR build for the CamCore image.
 
-## Installation
+CamCore-specific modifications are applied at image build time on top of the LinuxServer Tautulli image. This keeps the maintained downstream small and reduces conflicts when Tautulli changes upstream.
 
-[![Python][badge-python]][Python]
-[![Docker Pulls][badge-docker-pulls]][DockerHub]
-[![Docker Stars][badge-docker-stars]][DockerHub]
-[![Downloads][badge-downloads]][Releases Latest]
+## Email communication standard
 
-[badge-python]: https://img.shields.io/badge/python->=3.10-blue?style=flat-square
-[badge-docker-pulls]: https://img.shields.io/docker/pulls/tautulli/tautulli?style=flat-square
-[badge-docker-stars]: https://img.shields.io/docker/stars/tautulli/tautulli?style=flat-square
-[badge-downloads]: https://img.shields.io/github/downloads/Tautulli/Tautulli/total?style=flat-square
+### Operational notifications
 
-| Status | Branch: `master` | Branch: `beta` | Branch: `nightly` |
-| --- | --- | --- | --- |
-| Release   | [![Release@master][badge-release-master]][Releases Latest] <br> [![Release Date@master][badge-release-master-date]][Releases Latest] | [![Release@beta][badge-release-beta]][Releases] <br> [![Commits@beta][badge-release-beta-commits]][Commits Beta] | [![Last Commits@nightly][badge-release-nightly-last-commit]][commits Nightly] <br> [![Commits@nightly][badge-release-nightly-commits]][Commits Nightly] |
-| Docker    | [![Docker@master][badge-docker-master]][DockerHub] <br> [![Docker Build@master][badge-docker-master-ci]][Publish Docker Master] | [![Docker@beta][badge-docker-beta]][DockerHub] <br> [![Docker Build@beta][badge-docker-beta-ci]][Publish Docker Beta] | [![Docker@nightly][badge-docker-nightly]][DockerHub] <br> [![Docker Build@nightly][badge-docker-nightly-ci]][Publish Docker Nightly] |
-| Snap      | [![Snap@master][badge-snap-master]][Snapcraft] <br> [![Snap Build@master][badge-snap-master-ci]][Publish Snap Master] | [![Snap@beta][badge-snap-beta]][Snapcraft] <br> [![Snap Build@beta][badge-snap-beta-ci]][Publish Snap Beta] | [![Snap@nightly][badge-snap-nightly]][Snapcraft] <br> [![Snap Build@nightly][badge-snap-nightly-ci]][Publish Snap Nightly] |
-| Installer | [![Windows@master][badge-installer-master-win]][Releases Latest] <br> [![MacOS@master][badge-installer-master-macos]][Releases Latest] <br> [![Installer Build@master][badge-installer-master-ci]][Publish Installer Master] | [![Windows@beta][badge-installer-beta-win]][Releases] <br> [![MacOS@beta][badge-installer-beta-macos]][Releases] <br> [![Installer Build@beta][badge-installer-beta-ci]][Publish Installer Beta] | [![Installer Build@nightly][badge-installer-nightly-ci]][Publish Installer Nightly] |
+Operational notifications use:
 
-Read the [Installation Guides][Installation] for instructions on how to install Tautulli.
+```text
+Insights | CamCore Media <help@camcore.au>
+```
 
-[badge-release-master]: https://img.shields.io/github/v/release/Tautulli/Tautulli?style=flat-square
-[badge-release-master-date]: https://img.shields.io/github/release-date/Tautulli/Tautulli?style=flat-square&color=blue
-[badge-release-beta]: https://img.shields.io/github/v/release/Tautulli/Tautulli?include_prereleases&style=flat-square
-[badge-release-beta-commits]: https://img.shields.io/github/commits-since/Tautulli/Tautulli/latest/beta?style=flat-square&color=blue
-[badge-release-nightly-last-commit]: https://img.shields.io/github/last-commit/Tautulli/Tautulli/nightly?style=flat-square&color=blue
-[badge-release-nightly-commits]: https://img.shields.io/github/commits-since/Tautulli/Tautulli/latest/nightly?style=flat-square&color=blue
-[badge-docker-master]: https://img.shields.io/badge/docker-latest-blue?style=flat-square
-[badge-docker-master-ci]: https://img.shields.io/github/actions/workflow/status/Tautulli/Tautulli/.github/workflows/publish-docker.yml?style=flat-square&branch=master
-[badge-docker-beta]: https://img.shields.io/badge/docker-beta-blue?style=flat-square
-[badge-docker-beta-ci]: https://img.shields.io/github/actions/workflow/status/Tautulli/Tautulli/.github/workflows/publish-docker.yml?style=flat-square&branch=beta
-[badge-docker-nightly]: https://img.shields.io/badge/docker-nightly-blue?style=flat-square
-[badge-docker-nightly-ci]: https://img.shields.io/github/actions/workflow/status/Tautulli/Tautulli/.github/workflows/publish-docker.yml?style=flat-square&branch=nightly
-[badge-snap-master]: https://img.shields.io/badge/snap-stable-blue?style=flat-square
-[badge-snap-master-ci]: https://img.shields.io/github/actions/workflow/status/Tautulli/Tautulli/.github/workflows/publish-snap.yml?style=flat-square&branch=master
-[badge-snap-beta]: https://img.shields.io/badge/snap-beta-blue?style=flat-square
-[badge-snap-beta-ci]: https://img.shields.io/github/actions/workflow/status/Tautulli/Tautulli/.github/workflows/publish-snap.yml?style=flat-square&branch=beta
-[badge-snap-nightly]: https://img.shields.io/badge/snap-edge-blue?style=flat-square
-[badge-snap-nightly-ci]: https://img.shields.io/github/actions/workflow/status/Tautulli/Tautulli/.github/workflows/publish-snap.yml?style=flat-square&branch=nightly
-[badge-installer-master-win]: https://img.shields.io/github/v/release/Tautulli/Tautulli?label=windows&style=flat-square
-[badge-installer-master-macos]: https://img.shields.io/github/v/release/Tautulli/Tautulli?label=macos&style=flat-square
-[badge-installer-master-ci]: https://img.shields.io/github/actions/workflow/status/Tautulli/Tautulli/.github/workflows/publish-installers.yml?style=flat-square&branch=master
-[badge-installer-beta-win]: https://img.shields.io/github/v/release/Tautulli/Tautulli?label=windows&include_prereleases&style=flat-square
-[badge-installer-beta-macos]: https://img.shields.io/github/v/release/Tautulli/Tautulli?label=macos&include_prereleases&style=flat-square
-[badge-installer-beta-ci]: https://img.shields.io/github/actions/workflow/status/Tautulli/Tautulli/.github/workflows/publish-installers.yml?style=flat-square&branch=beta
-[badge-installer-nightly-ci]: https://img.shields.io/github/actions/workflow/status/Tautulli/Tautulli/.github/workflows/publish-installers.yml?style=flat-square&branch=nightly
+Stock Tautulli subjects such as `Tautulli ({server_name})` are replaced with event-first subjects, for example:
 
-## Support
+```text
+Playback started — <title>
+Buffering detected — <title>
+New playback device — <user>
+Cameron-Media is unavailable
+Cameron-Media is back online
+Cameron-Media remote access restored
+Plex Media Server update available
+Media Insights update available
+Media Insights database issue detected
+Media Insights lost Plex access
+```
 
-[![Wiki][badge-wiki]][Wiki]
-[![Discord][badge-discord]][Discord]
-[![Reddit][badge-reddit]][Reddit]
-[![Plex Forums][badge-forums]][Plex Forums]
-[![Issues][badge-issues]][Issues]
+Operational HTML email uses the same CamCore communication system as other CamCore services: dark CamCore header, cyan divider, event badge, white content panel, service details, primary action and CamCore support/status links.
 
-[badge-wiki]: https://img.shields.io/badge/github-wiki-black?style=flat-square
-[badge-discord]: https://img.shields.io/discord/183396325142822912?label=discord&style=flat-square&color=7289DA
-[badge-reddit]: https://img.shields.io/reddit/subreddit-subscribers/tautulli?label=reddit&style=flat-square&color=FF5700
-[badge-forums]: https://img.shields.io/badge/plex%20forums-discussion-E5A00D?style=flat-square
-[badge-issues]: https://img.shields.io/badge/github-issues-black?style=flat-square
+Existing notifier subjects and bodies are only automatically upgraded when they still match the untouched upstream Tautulli defaults. Deliberately customised notification text is preserved.
 
-If you think you've found a bug in Tautulli make sure you have read the [FAQ][]
-first to make sure it hasn't been covered by one of the questions there. If your
-problem isn't answered in the FAQ try the following first:
+### Cameron-Media weekly updates
 
--   Update to the latest version of Tautulli.
--   Turning your device off and on again.
--   Analyzing your logs, you just might find the solution yourself!
--   Using the **search** function to see if this issue has already been reported/solved.
--   Checking the [Wiki][] for [Installation][] instructions and reading the [FAQs][FAQ].
--   For basic questions try asking on [Discord][], [Reddit][], 
-    or the [Plex Forums][] first before opening an issue.
+Weekly updates use:
 
-**If nothing has worked:**
+```text
+Updates | CamCore Media <help@camcore.au>
+```
 
-1.  Please check the [issues tracker][Issues] to see if someone else has already reported the bug.
-2.  If this is a new bug, open a [bug report][Issue New] on the issues tracker.
-3.  Provide a clear title to easily help identify your problem.
-4.  Use proper [Markdown syntax][] to structure your post (i.e. code/log in code blocks).
-5.  Make sure to fill out the required information on the issue template.
-6.  Close your issue when it's solved! If you found the solution yourself please
-    comment so that others benefit from it.
+The default subject is:
 
-## Feature Requests
+```text
+What's new on Cameron-Media — <date>
+```
 
-1.  Pleases check the [issues tracker][Issues] to see if someone else has already requested the feature.
-    If a similar idea has already been requested, _give it a thumbs up_. **Do not comment
-    with `+1` or something similar as it creates unnecessary spam.**
-2.  If this is a new feature request, open a [feature request][Issue New] on the issues tracker.
+The newsletter includes direct pathways to Cameron-Media, Cameron-Media Requests, Service Status and CamCore Support.
 
-## License
+## Container image
 
-[![License][badge-license]][License]
+Successful production builds publish:
 
-[badge-license]: https://img.shields.io/github/license/Tautulli/Tautulli?style=flat-square
+```text
+ghcr.io/camcoreau/tautulli:latest
+ghcr.io/camcoreau/tautulli:camcore
+ghcr.io/camcoreau/tautulli:master-<sha>
+```
 
-This is free software under the GPL v3 open source license. Feel free to do with it what you wish,
-but any modification must be open sourced. A copy of the license is included.
+The CamCore deployment image is built for:
 
-This software includes Highsoft software libraries which you may freely distribute for 
-non-commercial use. Commercial users must licence this software, for more information visit
-https://shop.highsoft.com/faq/non-commercial#non-commercial-redistribution.
+```text
+linux/amd64
+```
 
+Change branches run validation without publishing. `master` publishes only after the CamCore patch layer has been applied and the patched Tautulli Python modules compile successfully.
 
-[Python]: https://python.org/downloads
-[DockerHub]: https://hub.docker.com/r/tautulli/tautulli
-[Releases]: https://github.com/Tautulli/Tautulli/releases
-[Releases Latest]: https://github.com/Tautulli/Tautulli/releases/latest
-[License]: https://github.com/Tautulli/Tautulli/blob/master/LICENSE
-[FAQ]: https://github.com/Tautulli/Tautulli/wiki/Frequently-Asked-Questions
-[Installation]: https://github.com/Tautulli/Tautulli/wiki/Installation
-[Issues]: https://github.com/Tautulli/Tautulli/issues
-[Issue New]: https://github.com/Tautulli/Tautulli/issues/new/choose
-[Markdown syntax]: https://help.github.com/articles/github-flavored-markdown
-[Tautulli]: http://tautulli.com
-[Wiki]: https://github.com/Tautulli/Tautulli/wiki
-[Discord]: https://tautulli.com/discord
-[Reddit]: https://reddit.com/r/Tautulli
-[Plex Forums]: https://forums.plex.tv/t/tautulli-monitor-your-plex-media-server/225242
-[Snapcraft]: https://snapcraft.io/tautulli
-[Commits Beta]: https://github.com/Tautulli/Tautulli/commits/beta
-[Commits Nightly]: https://github.com/Tautulli/Tautulli/commits/nightly
+## Existing configuration
 
-[Publish Docker Master]: https://github.com/Tautulli/Tautulli/actions?query=workflow%3A"Publish+Docker"+branch%3Amaster
-[Publish Docker Beta]: https://github.com/Tautulli/Tautulli/actions?query=workflow%3A"Publish+Docker"+branch%3Abeta
-[Publish Docker Nightly]: https://github.com/Tautulli/Tautulli/actions?query=workflow%3A"Publish+Docker"+branch%3Anightly
-[Publish Snap Master]: https://github.com/Tautulli/Tautulli/actions?query=workflow%3A"Publish+Snap"+branch%3Amaster
-[Publish Snap Beta]: https://github.com/Tautulli/Tautulli/actions?query=workflow%3A"Publish+Snap"+branch%3Abeta
-[Publish Snap Nightly]: https://github.com/Tautulli/Tautulli/actions?query=workflow%3A"Publish+Snap"+branch%3Anightly
-[Publish Installer Master]: https://github.com/Tautulli/Tautulli/actions?query=workflow%3A"Publish+Installers"+branch%3Amaster
-[Publish Installer Beta]: https://github.com/Tautulli/Tautulli/actions?query=workflow%3A"Publish+Installers"+branch%3Abeta
-[Publish Installer Nightly]: https://github.com/Tautulli/Tautulli/actions?query=workflow%3A"Publish+Installers"+branch%3Anightly
+Tautulli configuration and its database remain outside the container image in the normal LinuxServer `/config` volume. Keep the existing `/config` mapping when updating the CamCore image.
+
+Before an update:
+
+1. back up the existing Tautulli `/config` directory;
+2. record the currently deployed image tag or digest;
+3. confirm the CamCore workflow completed successfully;
+4. pull the required CamCore image;
+5. recreate the container without changing the `/config` mapping;
+6. verify Tautulli, Plex connectivity, notifications and newsletters.
+
+## Keeping the downstream current
+
+The fork should remain close to `Tautulli/Tautulli:master`.
+
+When incorporating upstream changes:
+
+1. sync upstream Tautulli into this repository;
+2. run the CamCore validation workflow;
+3. confirm all patch scripts still apply cleanly;
+4. review Tautulli notification/newsletter changes that may affect the downstream layer;
+5. publish the validated CamCore image;
+6. deploy while preserving `/config`;
+7. verify Media Insights and email/newsletter delivery.
+
+## Upstream project
+
+The underlying application is developed by the [Tautulli project](https://github.com/Tautulli/Tautulli) and its open-source contributors.
+
+For upstream Tautulli documentation, releases and general application issues, use the upstream project resources:
+
+- [Tautulli repository](https://github.com/Tautulli/Tautulli)
+- [Tautulli releases](https://github.com/Tautulli/Tautulli/releases)
+- [Tautulli wiki](https://github.com/Tautulli/Tautulli/wiki)
+- [Tautulli issue tracker](https://github.com/Tautulli/Tautulli/issues)
+
+CamCore-specific deployment, branding and operational matters should use CamCore Support.
+
+## Licence
+
+This downstream remains subject to the upstream [GNU General Public License v3.0](LICENSE).
