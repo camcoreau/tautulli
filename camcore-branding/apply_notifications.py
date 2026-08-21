@@ -104,7 +104,7 @@ notifiers = replace_text_once(
 constants_marker = "DEFAULT_CUSTOM_CONDITIONS = [{'parameter': '', 'operator': '', 'value': [], 'type': None}]\n"
 constants_block = constants_marker + f"""
 CAMCORE_EMAIL_LOGO_CID = 'camcore-media-insights-logo'
-CAMCORE_EMAIL_LOGO_PATH = os.path.join(plexpy.PROG_DIR, 'data', 'interfaces', 'default', 'images', 'camcore-logo-dark.png')
+CAMCORE_EMAIL_LOGO_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'interfaces', 'default', 'images', 'camcore-logo-dark.png')
 CAMCORE_EMAIL_DEFAULTS = {CAMCORE_ACTION_TEXT!r}
 CAMCORE_EMAIL_LEGACY_DEFAULTS = {LEGACY_ACTION_TEXT!r}
 CAMCORE_EMAIL_EVENT_LABELS = {EVENT_LABELS!r}
