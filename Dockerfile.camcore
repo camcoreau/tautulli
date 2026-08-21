@@ -24,6 +24,7 @@ RUN python3 /tmp/apply_camcore_branding.py && \
       /app/tautulli/plexpy/notifiers.py \
       /app/tautulli/plexpy/newsletters.py \
       /app/tautulli/plexpy/notification_handler.py && \
+    python3 -c "import sys; sys.path.insert(0, '/app/tautulli'); import Tautulli" && \
     rm -f \
       /tmp/apply_camcore_branding.py \
       /tmp/apply_streaming_newsletter.py \
