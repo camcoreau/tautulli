@@ -138,7 +138,7 @@ jobs:
 
   build-and-publish-account-audit:
     name: Build and publish CMA account audit image
-    if: github.ref == 'refs/heads/master'
+    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/agent/cma-account-audit'
     needs: validate
     runs-on: ubuntu-24.04
     permissions:
@@ -167,8 +167,9 @@ jobs:
         with:
           images: ${{ env.AUDIT_IMAGE_NAME }}
           tags: |
-            type=raw,value=latest
-            type=sha,prefix=master-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' }}
+            type=sha,prefix=master-,enable=${{ github.ref == 'refs/heads/master' }}
+            type=sha,prefix=candidate-,enable=${{ github.ref == 'refs/heads/agent/cma-account-audit' }}
           labels: |
             org.opencontainers.image.title=Cameron-Media Account Audit
             org.opencontainers.image.description=Daily Tautulli to CMA YouTrack account review synchronization
