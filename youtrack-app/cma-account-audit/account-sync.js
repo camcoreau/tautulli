@@ -33,8 +33,8 @@ function optionalInteger(body, key) {
   return value;
 }
 
-function quoteQueryValue(value) {
-  return '"' + value.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+function queryValue(value) {
+  return '{' + value.replace(/([\\{}"])/g, '\\$1') + '}';
 }
 
 function exactMatches(project, fieldName, value, user) {
@@ -43,7 +43,7 @@ function exactMatches(project, fieldName, value, user) {
   }
   const matches = search.search(
     project,
-    {query: '{' + fieldName + '}: ' + quoteQueryValue(value)},
+    {query: '{' + fieldName + '}: ' + queryValue(value)},
     user
   );
   const exact = [];
@@ -67,7 +67,8 @@ function uniqueMatch(ctx, fieldName, value) {
 }
 
 function stageName(issue) {
-  return issue.fields.ReviewStage ? issue.fields.ReviewStage.name : null;
+  const value = issue.fields['Review Stage'];
+  return value ? value.name : null;
 }
 
 function statusValue(ctx, name) {
@@ -106,12 +107,12 @@ function buildDescription(body) {
 }
 
 function applyFacts(issue, body, ctx) {
-  issue.fields.PlexUserId = body.plexUserId;
-  issue.fields.PlexUsername = body.plexUsername;
-  issue.fields.LastStreamed = body.lastStreamedMs;
-  issue.fields.TotalPlays = body.totalPlays;
-  issue.fields.WatchTime = body.watchTime;
-  issue.fields.AccountStatus = statusValue(ctx, body.accountStatus);
+  issue.fields['Plex User ID'] = body.plexUserId;
+  issue.fields['Plex Username'] = body.plexUsername;
+  issue.fields['Last Streamed'] = body.lastStreamedMs;
+  issue.fields['Total Plays'] = body.totalPlays;
+  issue.fields['Watch Time'] = body.watchTime;
+  issue.fields['Account Status'] = statusValue(ctx, body.accountStatus);
 }
 
 function applyReviewDecision(issue, body, ctx) {
@@ -119,7 +120,7 @@ function applyReviewDecision(issue, body, ctx) {
 
   if (body.accountStatus === 'Active' &&
       REVIEW_STAGES_IN_PROGRESS.indexOf(currentStage) !== -1) {
-    issue.fields.ReviewStage = ctx.ReviewStage.AccessRetained;
+    issue.fields['Review Stage'] = ctx.ReviewStage.AccessRetained;
     return 'retained';
   }
 
@@ -135,7 +136,7 @@ function applyReviewDecision(issue, body, ctx) {
     return 'review-already-in-progress';
   }
 
-  issue.fields.ReviewStage = ctx.ReviewStage.InactivityNotice;
+  issue.fields['Review Stage'] = ctx.ReviewStage.InactivityNotice;
   return 'notice-started';
 }
 
@@ -265,3 +266,4 @@ exports.httpHandler = {
     }
   }
 };
+
