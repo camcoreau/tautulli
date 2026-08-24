@@ -33,8 +33,8 @@ function optionalInteger(body, key) {
   return value;
 }
 
-function quoteQueryValue(value) {
-  return '"' + value.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+function queryValue(value) {
+  return '{' + value.replace(/([\\{}"])/g, '\\$1') + '}';
 }
 
 function exactMatches(project, fieldName, value, user) {
@@ -43,7 +43,7 @@ function exactMatches(project, fieldName, value, user) {
   }
   const matches = search.search(
     project,
-    {query: '{' + fieldName + '}: ' + quoteQueryValue(value)},
+    {query: '{' + fieldName + '}: ' + queryValue(value)},
     user
   );
   const exact = [];
@@ -67,20 +67,20 @@ function uniqueMatch(ctx, fieldName, value) {
 }
 
 function stageName(issue) {
-  return issue.fields.ReviewStage ? issue.fields.ReviewStage.name : null;
+  const value = issue.fields['Review Stage'];
+  return value ? value.name : null;
 }
 
-function statusValue(ctx, name) {
-  if (name === 'Active') {
-    return ctx.AccountStatus.Active;
+function projectValue(issue, fieldName, valueName) {
+  const field = issue.project.findFieldByName(fieldName);
+  if (!field) {
+    throw new Error(fieldName + ' is not attached to project ' + issue.project.shortName);
   }
-  if (name === 'Inactive') {
-    return ctx.AccountStatus.Inactive;
+  const value = field.findValueByName(valueName);
+  if (!value) {
+    throw new Error(fieldName + ' does not contain value ' + valueName);
   }
-  if (name === 'Never Used') {
-    return ctx.AccountStatus.NeverUsed;
-  }
-  throw new Error('accountStatus must be Active, Inactive, or Never Used');
+  return value;
 }
 
 function buildDescription(body) {
@@ -105,13 +105,13 @@ function buildDescription(body) {
   ].join('\n');
 }
 
-function applyFacts(issue, body, ctx) {
-  issue.fields.PlexUserId = body.plexUserId;
-  issue.fields.PlexUsername = body.plexUsername;
-  issue.fields.LastStreamed = body.lastStreamedMs;
-  issue.fields.TotalPlays = body.totalPlays;
-  issue.fields.WatchTime = body.watchTime;
-  issue.fields.AccountStatus = statusValue(ctx, body.accountStatus);
+function applyFacts(issue, body) {
+  issue.fields['Plex User ID'] = body.plexUserId;
+  issue.fields['Plex Username'] = body.plexUsername;
+  issue.fields['Last Streamed'] = body.lastStreamedMs;
+  issue.fields['Total Plays'] = body.totalPlays;
+  issue.fields['Watch Time'] = body.watchTime;
+  issue.fields['Account Status'] = projectValue(issue, 'Account Status', body.accountStatus);
 }
 
 function applyReviewDecision(issue, body, ctx) {
@@ -119,7 +119,7 @@ function applyReviewDecision(issue, body, ctx) {
 
   if (body.accountStatus === 'Active' &&
       REVIEW_STAGES_IN_PROGRESS.indexOf(currentStage) !== -1) {
-    issue.fields.ReviewStage = ctx.ReviewStage.AccessRetained;
+    issue.fields['Review Stage'] = projectValue(issue, 'Review Stage', 'Access Retained');
     return 'retained';
   }
 
@@ -135,7 +135,7 @@ function applyReviewDecision(issue, body, ctx) {
     return 'review-already-in-progress';
   }
 
-  issue.fields.ReviewStage = ctx.ReviewStage.InactivityNotice;
+  issue.fields['Review Stage'] = projectValue(issue, 'Review Stage', 'Inactivity Notice');
   return 'notice-started';
 }
 
@@ -208,7 +208,7 @@ exports.httpHandler = {
         }
 
         try {
-          applyFacts(issue, body, ctx);
+          applyFacts(issue, body);
           const action = applyReviewDecision(issue, body, ctx);
           ctx.response.json({
             result: created ? 'created' : 'updated',
@@ -265,3 +265,4 @@ exports.httpHandler = {
     }
   }
 };
+
