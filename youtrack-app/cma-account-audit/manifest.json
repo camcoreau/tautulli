@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json.schemastore.org/youtrack-app.json",
+  "name": "cma-account-audit",
+  "title": "CMA Account Audit",
+  "description": "Project-scoped Tautulli account synchronization for Cameron-Media Account Administration.",
+  "version": "1.0.1",
+  "minYouTrackVersion": "2025.3.0",
+  "changeNotes": "Require exact Plex identifiers and reject duplicate account records.",
+  "vendor": {
+    "name": "CamCore.au",
+    "url": "https://camcore.au",
+    "email": "help@camcore.au"
+  }
+}
