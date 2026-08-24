@@ -5,7 +5,7 @@
   "description": "Project-scoped Tautulli account synchronization for Cameron-Media Account Administration.",
   "version": "1.0.2",
   "minYouTrackVersion": "2025.3.0",
-  "changeNotes": "Fix string-field lookup syntax and custom field access for project-scoped HTTP handlers.",
+  "changeNotes": "Fix string-field lookup syntax, project-scoped field access, and project-specific bundle values.",
   "vendor": {
     "name": "CamCore.au",
     "url": "https://camcore.au",
