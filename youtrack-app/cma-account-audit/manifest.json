@@ -3,12 +3,13 @@
   "name": "cma-account-audit",
   "title": "CMA Account Audit",
   "description": "Project-scoped Tautulli account synchronization for Cameron-Media Account Administration.",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "minYouTrackVersion": "2025.3.0",
-  "changeNotes": "Require exact Plex identifiers and reject duplicate account records.",
+  "changeNotes": "Fix string-field lookup syntax and custom field access for project-scoped HTTP handlers.",
   "vendor": {
     "name": "CamCore.au",
     "url": "https://camcore.au",
     "email": "help@camcore.au"
   }
 }
+
