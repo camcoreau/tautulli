@@ -17,6 +17,7 @@
 
 import distro
 import platform
+import sqlite3
 from collections import OrderedDict
 
 from plexpy import version
@@ -30,6 +31,7 @@ PLATFORM_VERSION = platform.version()
 PLATFORM_LINUX_DISTRO = ' '.join(x for x in distro.linux_distribution() if x)
 PLATFORM_DEVICE_NAME = platform.node()
 PYTHON_VERSION = platform.python_version()
+SQLITE_VERSION = sqlite3.sqlite_version
 BRANCH = version.PLEXPY_BRANCH
 RELEASE = version.PLEXPY_RELEASE_VERSION
 
@@ -170,8 +172,8 @@ AUDIO_CODEC_OVERRIDES = {
 
 VIDEO_RESOLUTION_OVERRIDES = {
     'sd': 'SD',
-    '2k': '2k',
-    '4k': '4k'
+    '2k': '2K',
+    '4k': '4K'
 }
 
 AUDIO_CHANNELS = {
@@ -479,6 +481,7 @@ NOTIFICATION_PARAMETERS = [
              {'name': 'Stream Audio Language', 'type': 'str', 'value': 'stream_audio_language', 'description': 'The audio language of the stream.'},
              {'name': 'Stream Audio Language Code', 'type': 'str', 'value': 'stream_audio_language_code', 'description': 'The audio language code of the stream.'},
              {'name': 'Stream Audio Profile', 'type': 'str', 'value': 'stream_audio_profile', 'description': 'The audio profile of the stream.'},
+             {'name': 'Stream Audio Atmos', 'type': 'int', 'value': 'stream_audio_atmos', 'description': 'If Dolby Atmos is present in the stream.', 'example': '0 or 1'},
              {'name': 'Stream Subtitle Codec', 'type': 'str', 'value': 'stream_subtitle_codec', 'description': 'The subtitle codec of the stream.'},
              {'name': 'Stream Subtitle Container', 'type': 'str', 'value': 'stream_subtitle_container', 'description': 'The subtitle container of the stream.'},
              {'name': 'Stream Subtitle Format', 'type': 'str', 'value': 'stream_subtitle_format', 'description': 'The subtitle format of the stream.'},
@@ -613,6 +616,7 @@ NOTIFICATION_PARAMETERS = [
              {'name': 'Audio Language', 'type': 'str', 'value': 'audio_language', 'description': 'The audio language of the original media.'},
              {'name': 'Audio Language Code', 'type': 'str', 'value': 'audio_language_code', 'description': 'The audio language code of the original media.'},
              {'name': 'Audio Profile', 'type': 'str', 'value': 'audio_profile', 'description': 'The audio profile of the original media.'},
+             {'name': 'Audio Atmos', 'type': 'int', 'value': 'audio_atmos', 'description': 'If Dolby Atmos is present in the original media.', 'example': '0 or 1'},
              {'name': 'Subtitle Codec', 'type': 'str', 'value': 'subtitle_codec', 'description': 'The subtitle codec of the original media.'},
              {'name': 'Subtitle Container', 'type': 'str', 'value': 'subtitle_container', 'description': 'The subtitle container of the original media.'},
              {'name': 'Subtitle Format', 'type': 'str', 'value': 'subtitle_format', 'description': 'The subtitle format of the original media.'},

@@ -25,8 +25,6 @@
             <div id="currentActivity">
                 % if PLEX_SERVER_UP:
                 <div class="text-muted" id="dashboard-checking-activity"><i class="fa fa-refresh fa-spin"></i>&nbsp; Checking for activity...</div>
-                % elif config['pms_is_cloud']:
-                <div id="dashboard-no-activity" class="text-muted">Plex Cloud server is sleeping.</div>
                 % elif not config['first_run_complete']:
                 <div id="dashboard-no-activity" class="text-muted">The Tautulli setup wizard has not been completed. Please click <a href="welcome">here</a> to go to the setup wizard.</div>
                 % else:
@@ -129,8 +127,6 @@
             <div id="recentlyAdded" style="margin-right: -15px;">
                 % if PLEX_SERVER_UP:
                 <div id="dashboard-checking-recently-added" class="text-muted"><i class="fa fa-refresh fa-spin"></i>&nbsp; Looking for new items...</div>
-                % elif config['pms_is_cloud']:
-                <div class="text-muted">Plex Cloud server is sleeping.</div>
                 % else:
                 <div id="dashboard-no-recently-added" class="text-muted"><i class="fa fa-refresh fa-spin"></i>&nbsp; Tautulli is connecting to your Plex server...</div>
                 % endif
@@ -469,28 +465,8 @@
                         if (['movie', 'episode', 'clip'].indexOf(s.media_type) > -1 && s.stream_video_decision) {
                             var v_bd =  (s.video_dynamic_range !== 'SDR') ? ' ' + s.video_dynamic_range : '';
                             var sv_bd =  (s.stream_video_dynamic_range !== 'SDR' || v_bd) ? ' ' + s.stream_video_dynamic_range : '';
-                            var v_res= '';
-                            switch (s.video_resolution.toLowerCase()) {
-                                case 'sd':
-                                    v_res = 'SD';
-                                    break;
-                                case '4k':
-                                    v_res = '4k';
-                                    break;
-                                default:
-                                    v_res = s.video_full_resolution;
-                            }
-                            var sv_res = '';
-                            switch (s.stream_video_resolution.toLowerCase()) {
-                                case 'sd':
-                                    sv_res = 'SD';
-                                    break;
-                                case '4k':
-                                    sv_res = '4k';
-                                    break;
-                                default:
-                                    sv_res = s.stream_video_full_resolution;
-                            }
+                            var v_res= s.video_full_resolution;
+                            var sv_res = s.stream_video_full_resolution;
                             if (s.stream_video_decision === 'transcode') {
                                 var hw_d = (s.transcode_hw_decoding === 1) ? ' (HW)' : '';
                                 var hw_e = (s.transcode_hw_encoding === 1) ? ' (HW)' : '';
@@ -510,12 +486,14 @@
                             var audio_language = (s.media_type !== 'track') ? (s.audio_language || 'Unknown') + ' - ' : '';
                             var a_codec = (s.audio_codec === 'truehd') ? 'TrueHD' : s.audio_codec.toUpperCase();
                             var sa_codec = (s.stream_audio_codec === 'truehd') ? 'TrueHD' : s.stream_audio_codec.toUpperCase();
+                            var a_atmos = (s.audio_atmos) ? ' + Atmos' : '';
+                            var sa_atmos = (s.stream_audio_atmos) ? ' + Atmos' : '';
                             if (s.stream_audio_decision === 'transcode') {
-                                audio_decision = 'Transcode (' + audio_language + a_codec + ' ' + capitalizeFirstLetter(s.audio_channel_layout.split('(')[0]) + ' <i class="fa fa-long-arrow-right"></i> ' + sa_codec + ' ' + capitalizeFirstLetter(s.stream_audio_channel_layout.split('(')[0]) + ')';
+                                audio_decision = 'Transcode (' + audio_language + a_codec + ' ' + capitalizeFirstLetter(s.audio_channel_layout.split('(')[0]) + a_atmos + ' <i class="fa fa-long-arrow-right"></i> ' + sa_codec + ' ' + capitalizeFirstLetter(s.stream_audio_channel_layout.split('(')[0]) + sa_atmos + ')';
                             } else if (s.stream_audio_decision === 'copy') {
-                                audio_decision = 'Direct Stream (' + audio_language + sa_codec + ' ' + capitalizeFirstLetter(s.stream_audio_channel_layout.split('(')[0]) + ')';
+                                audio_decision = 'Direct Stream (' + audio_language + sa_codec + ' ' + capitalizeFirstLetter(s.stream_audio_channel_layout.split('(')[0]) + sa_atmos + ')';
                             } else {
-                                audio_decision = 'Direct Play (' + audio_language + sa_codec + ' ' + capitalizeFirstLetter(s.stream_audio_channel_layout.split('(')[0]) + ')';
+                                audio_decision = 'Direct Play (' + audio_language + sa_codec + ' ' + capitalizeFirstLetter(s.stream_audio_channel_layout.split('(')[0]) + sa_atmos + ')';
                             }
                         }
                         $('#audio_decision-' + key).html(audio_decision);

@@ -5,7 +5,7 @@
 
     import plexpy
     from plexpy import common, notifiers, newsletters
-    from plexpy.helpers import anon_url, checked
+    from plexpy.helpers import anon_url, checked, json_dumps_for_html
 
     docker_setting = 'disabled' if plexpy.DOCKER else ''
     docker_msg = '<span class="setting-message small">(Controlled by Docker Container)</span>' if plexpy.DOCKER else ''
@@ -359,6 +359,22 @@
                             </div>
                         </div>
                         % endif
+
+                        <div class="padded-header advanced-setting">
+                            <h3>System Analytics</h3>
+                        </div>
+
+                        <div class="checkbox advanced-setting">
+                            <label>
+                                <input type="checkbox" id="system_analytics" name="system_analytics" value="1" ${config['system_analytics']}> Send Anonymous System Analytics
+                            </label>
+                            <p class="help-block">Enable anonymous system analytics to help improve Tautulli. No personal information is collected. Refer to the
+                                <a href="${anon_url('https://github.com/%s/%s/wiki/Frequently-Asked-Questions#general-q21' % (plexpy.CONFIG.GIT_USER, plexpy.CONFIG.GIT_REPO))}" target="_blank" rel="noreferrer">
+                                    FAQ
+                                </a>
+                                to see what data is being collected. You can disable this at any time.
+                            </p>
+                        </div>
 
                         <p><input type="button" class="btn btn-bright save-button" value="Save" data-success="Changes saved successfully"></p>
 
@@ -768,7 +784,6 @@
                                                     data-ip="${config['pms_ip']}"
                                                     data-port="${config['pms_port']}"
                                                     data-ssl="${config['pms_ssl']}"
-                                                    data-is_cloud="${config['pms_is_cloud']}"
                                                     data-label="${config['pms_name'] or 'Local'}"
                                                     selected>${config['pms_ip']}</option>
                                         </select>
@@ -851,7 +866,6 @@
                         </div>
 
                         <input type="hidden" id="pms_ip" name="pms_ip" value="${config['pms_ip']}">
-                        <input type="hidden" id="pms_is_cloud" name="pms_is_cloud" value="${config['pms_is_cloud']}">
                         <input type="checkbox" name="server_changed" id="server_changed" value="1" style="display: none;">
 
                         <div class="form-group advanced-setting">
@@ -2093,7 +2107,7 @@ Rating: {rating}/10   --> Rating: /10
                     or manually enter the connection info and device token into the app settings. This window will automatically close once device registration is successful.
                 </p>
                 <p class="help-block">
-                    Note: OneSignal.com must not be blocked (e.g. in Pi-hole) for device registration.
+                    Note: Tautulli must be able to reach relay.tautulliremote.com (e.g. not blocked in Pi-hole) to validate the device and deliver notifications.
                 </p>
                 <label>QR Code</label>
                 <div id="api_qr_code"></div>
@@ -2593,7 +2607,6 @@ $(document).ready(function() {
                         '" data-ip="' + item.ip +
                         '" data-port="' + item.port +
                         '" data-ssl="' + item.httpsRequired +
-                        '" data-is_cloud="' + item.is_cloud +
                         '" data-label="' + item.label + '">' +
                         '<span class="item-text">' + escape(label) + '</span>' +
                         (caption ? '<span class="item-value">' + escape(caption) + '</span>' : '') +
@@ -2606,7 +2619,6 @@ $(document).ready(function() {
                         '" data-ip="' + item.ip +
                         '" data-port="' + item.port +
                         '" data-ssl="' + item.httpsRequired +
-                        '" data-is_cloud="' + item.is_cloud +
                         '" data-label="' + item.label + '">' +
                         escape(label) +
                         (caption ? '<span class="caption">' + escape(caption) + '</span>' : '') +
@@ -2628,7 +2640,6 @@ $(document).ready(function() {
             var ip = $(pms_ip_selected).data('ip');
             var port = $(pms_ip_selected).data('port');
             var ssl = $(pms_ip_selected).data('ssl');
-            var is_cloud = $(pms_ip_selected).data('is_cloud');
             var value = $(pms_ip_selected).data('value');
 
             $("#pms_identifier").val(identifier !== 'undefined' ? identifier : '');
@@ -2636,7 +2647,6 @@ $(document).ready(function() {
             $('#pms_port').val(port !== 'undefined' ? port : 32400);
             $('#pms_ssl_checkbox').prop('checked', (ssl !== 'undefined' && ssl === 1));
             $('#pms_ssl').val(ssl !== 'undefined' && ssl === 1 ? 1 : 0);
-            $('#pms_is_cloud').val(is_cloud !== 'undefined' && is_cloud === true ? 1 : 0);
             $('#pms_url_manual').prop('checked', false);
             $('#pms_url').val('Please verify your server above to retrieve the URL');
         },
@@ -2829,7 +2839,7 @@ $(document).ready(function() {
         $('#home_sections').val(home_sections);
     }
 
-    var sec_cards = ${config['home_sections'] | n};
+    var sec_cards = JSON.parse(${json_dumps_for_html(config['home_sections']) | n});
     sec_cards.reverse().forEach(function (item) {
         $('#hsec-' + item).prop('checked', !$(this).prop('checked'));
         $('#hsec-' + item).closest('li.card').prependTo('#sortable_home_sections');
@@ -2855,8 +2865,8 @@ $(document).ready(function() {
         $('#home_stats_cards').val(home_stats_cards);
     }
 
-    var config_cards = ${config['home_stats_cards'] | n};
-    config_cards.reverse().forEach(function (item) {
+    var home_stats_cards = JSON.parse(${json_dumps_for_html(config['home_stats_cards']) | n});
+    home_stats_cards.reverse().forEach(function (item) {
         $('#hscard-' + item).prop('checked', !$(this).prop('checked'));
         $('#hscard-' + item).closest('li.card').prependTo('#sortable_home_stats_cards');
     });
@@ -2900,8 +2910,8 @@ $(document).ready(function() {
                     '</li>'
                 );
             }
-            var config_cards = ${config['home_library_cards'] | n};
-            config_cards.reverse().forEach(function (item) {
+            var home_library_cards = JSON.parse(${json_dumps_for_html(config['home_library_cards']) | n});
+            home_library_cards.reverse().forEach(function (item) {
                 $('#hlcard-' + item).prop('checked', !$(this).prop('checked'));
                 $('#hlcard-' + item).closest('li.card').prependTo('#sortable_home_library_cards');
             });

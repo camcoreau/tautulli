@@ -244,14 +244,12 @@ def initialize(config_file):
             CONFIG.NEWSLETTER_DIR, os.path.join(DATA_DIR, 'newsletters'), 'newsletters')
 
         # Initialize the database
-        logger.info("Checking if the database upgrades are required...")
         try:
             dbcheck()
         except Exception as e:
             logger.error("Can't connect to the database: %s" % e)
 
         # Perform upgrades
-        logger.info("Checking if configuration upgrades are required...")
         try:
             upgrade()
         except Exception as e:
@@ -546,6 +544,9 @@ def start():
         notification_handler.start_threads(num_threads=CONFIG.NOTIFICATION_THREADS)
         notifiers.check_browser_enabled()
 
+        # Repair any device left unvalidated by an earlier outage
+        mobile_app.revalidate_devices()
+
         # Schedule newsletters
         newsletter_handler.NEWSLETTER_SCHED.start()
         newsletter_handler.schedule_newsletters()
@@ -553,18 +554,8 @@ def start():
         # Cancel processing exports
         exporter.cancel_exports()
 
-        if CONFIG.SYSTEM_ANALYTICS:
-            global TRACKER
-            TRACKER = initialize_tracker()
-
-            # Send system analytics events
-            if not CONFIG.FIRST_RUN_COMPLETE:
-                analytics_event(name='install')
-
-            elif _UPDATE:
-                analytics_event(name='update')
-
-            analytics_event(name='start')
+        if CONFIG.FIRST_RUN_COMPLETE:
+            run_analytics()
 
         _STARTED = True
 
@@ -601,6 +592,8 @@ def sig_handler(signum=None, frame=None):
 
 
 def dbcheck():
+    logger.info("Checking if the database upgrades are required...")
+
     conn_db = sqlite3.connect(DB_FILE)
     c_db = conn_db.cursor()
 
@@ -811,7 +804,7 @@ def dbcheck():
         "CREATE TABLE IF NOT EXISTS mobile_devices (id INTEGER PRIMARY KEY AUTOINCREMENT, "
         "device_id TEXT NOT NULL UNIQUE, device_token TEXT, device_name TEXT, "
         "platform TEXT, version TEXT, friendly_name TEXT, "
-        "onesignal_id TEXT, last_seen INTEGER, official INTEGER DEFAULT 0)"
+        "onesignal_id TEXT, push_token TEXT, last_seen INTEGER, official INTEGER DEFAULT 0)"
     )
 
     # tvmaze_lookup table :: This table keeps record of the TVmaze lookups
@@ -2399,6 +2392,15 @@ def dbcheck():
             c_db.execute("UPDATE mobile_devices SET platform = ? WHERE device_id = ?",
                          ["android", device_id])
 
+    # Upgrade mobile_devices table from earlier versions
+    try:
+        c_db.execute("SELECT push_token FROM mobile_devices")
+    except sqlite3.OperationalError:
+        logger.debug("Altering database. Updating database table mobile_devices.")
+        c_db.execute(
+            "ALTER TABLE mobile_devices ADD COLUMN push_token TEXT"
+        )
+
     # Upgrade notifiers table from earlier versions
     try:
         c_db.execute("SELECT custom_conditions FROM notifiers")
@@ -2590,6 +2592,11 @@ def dbcheck():
         c_db.execute(
             "UPDATE exports SET thumb_level = 9 WHERE include_thumb = 1"
         )
+
+    # Upgrade exports table from earlier versions
+    try:
+        c_db.execute("SELECT art_level FROM exports")
+    except sqlite3.OperationalError:
         c_db.execute(
             "ALTER TABLE exports ADD COLUMN art_level INTEGER DEFAULT 0"
         )
@@ -2698,7 +2705,19 @@ def dbcheck():
         logger.debug("User 'Local' does not exist. Adding user.")
         c_db.execute("INSERT INTO users (user_id, username) VALUES (0, 'Local')")
 
+    logger.info("Database upgrade complete.")
+
+    logger.info("Creating database indices....")
+
     # Create session_history table indices
+    c_db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_session_history_started "
+        "ON session_history (started)"
+    )
+    c_db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_session_history_stopped "
+        "ON session_history (stopped)"
+    )
     c_db.execute(
         "CREATE INDEX IF NOT EXISTS idx_session_history_media_type "
         "ON session_history (media_type)"
@@ -2730,6 +2749,10 @@ def dbcheck():
     c_db.execute(
         "CREATE INDEX IF NOT EXISTS idx_session_history_user_id_stopped "
         "ON session_history (user_id, stopped ASC)"
+    )
+    c_db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_session_history_user_id_rating_key "
+        "ON session_history (user_id, rating_key)"
     )
     c_db.execute(
         "CREATE INDEX IF NOT EXISTS idx_session_history_section_id "
@@ -2764,6 +2787,20 @@ def dbcheck():
         "ON session_history_media_info (transcode_decision)"
     )
 
+    # Create notify_log table indices
+    c_db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_notify_log_session "
+        "ON notify_log (session_key, rating_key, user_id)"
+    )
+    c_db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_notify_log_timestamp "
+        "ON notify_log (timestamp)"
+    )
+    c_db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_notify_log_action_tag "
+        "ON notify_log (notify_action, tag)"
+    )
+
     # Create lookup table indices
     c_db.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_tvmaze_lookup "
@@ -2793,6 +2830,8 @@ def dbcheck():
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_continued "
         "ON sessions_continued (user_id, machine_id, media_type)"
     )
+
+    logger.info("Database indices created.")
 
     # Set database version
     result = c_db.execute("SELECT value FROM version_info WHERE key = 'version'").fetchone()
@@ -2833,10 +2872,9 @@ def dbcheck():
 
 
 def upgrade():
-    if CONFIG.UPGRADE_FLAG == 0:
-        mobile_app.revalidate_onesignal_ids()
-        CONFIG.UPGRADE_FLAG = 1
-        CONFIG.write()
+    logger.info("Checking if the configurastion upgrades are required...")
+
+    logger.info("Configuration upgrade complete.")
 
     return
 
@@ -2931,6 +2969,25 @@ def generate_uuid():
     return uuid.uuid4().hex
 
 
+def run_analytics(first_run=False):
+    if not CONFIG.SYSTEM_ANALYTICS:
+        logger.info("System analytics disabled. No analytics events will be sent.")
+        return
+
+    logger.info("System analytics enabled. Sending analytics events...")
+
+    global TRACKER
+    TRACKER = initialize_tracker()
+
+    # Send system analytics events
+    if first_run:
+        send_analytics(name='install')
+    elif _UPDATE:
+        send_analytics(name='update')
+
+    send_analytics(name='start')
+
+
 def initialize_tracker():
     tracker = GtagMP(
         api_secret='Cl_LjAKUT26AS22YZwqaPw',
@@ -2940,7 +2997,17 @@ def initialize_tracker():
     return tracker
 
 
+def send_analytics(name, **kwargs):
+    if not TRACKER:
+        return
+
+    threading.Thread(target=analytics_event, args=(name,), kwargs=kwargs).start()
+
+
 def analytics_event(name, **kwargs):
+    if not TRACKER:
+        return
+    
     event = TRACKER.create_new_event(name=name)
     event.set_event_param('name', common.PRODUCT)
     event.set_event_param('version', common.RELEASE)
@@ -2951,6 +3018,7 @@ def analytics_event(name, **kwargs):
     event.set_event_param('platformVersion', common.PLATFORM_VERSION[:100])
     event.set_event_param('linuxDistro', common.PLATFORM_LINUX_DISTRO)
     event.set_event_param('pythonVersion', common.PYTHON_VERSION)
+    event.set_event_param('sqliteVersion', common.SQLITE_VERSION)
     event.set_event_param('language', SYS_LANGUAGE)
     event.set_event_param('encoding', SYS_ENCODING)
     event.set_event_param('timezone', str(SYS_TIMEZONE))
@@ -2959,18 +3027,23 @@ def analytics_event(name, **kwargs):
     for key, value in kwargs.items():
         event.set_event_param(key, value)
 
-    plex_tv = plextv.PlexTV()
-    ip_address = plex_tv.get_public_ip(output_format='text')
-    geolocation = plex_tv.get_geoip_lookup(ip_address) or {}
+    try:
+        plex_tv = plextv.PlexTV()
+        ip_address = plex_tv.get_public_ip(output_format='text')
+        geolocation = plex_tv.get_geoip_lookup(ip_address) or {}
 
-    event.set_event_param('country', geolocation.get('country', 'Unknown'))
-    event.set_event_param('countryCode', geolocation.get('code', 'Unknown'))
+        event.set_event_param('country', geolocation.get('country', 'Unknown'))
+        event.set_event_param('countryCode', geolocation.get('code', 'Unknown'))
+    except Exception as e:
+        logger.warn("Failed to get country location information: %s", e)
+        event.set_event_param('country', 'Unknown')
+        event.set_event_param('countryCode', 'Unknown')
 
-    if TRACKER:
-        try:
-            TRACKER.send(events=[event])
-        except Exception as e:
-            logger.warn("Failed to send analytics event for name '%s': %s" % (name, e))
+    try:
+        TRACKER.send(events=[event])
+        logger.info("Sent analytics event for name '%s'", name)
+    except Exception as e:
+        logger.warn("Failed to send analytics event for name '%s': %s", name, e)
 
 
 def check_folder_writable(folder, fallback, name):

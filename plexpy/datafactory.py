@@ -198,6 +198,45 @@ class DataFactory(object):
             table_name_union = None
             custom_where_union = group_by_union = columns_union = []
 
+        # Cheap filtered count for draws without a search filter: the 1:1
+        # joins cannot change the group count, so count the group keys on
+        # the base tables directly instead of materializing the joined,
+        # grouped result a second time. Joins are added back only for
+        # filters that reference the side tables (same pattern as
+        # get_total_duration).
+        media_type_live_case = ("(CASE WHEN session_history_metadata.live = 1 "
+                                "THEN 'live' ELSE session_history.media_type END)")
+        count_join_tables = set()
+        count_alias = ''
+        for c_where in custom_where:
+            if 'session_history_metadata.' in c_where[0]:
+                count_join_tables.add('session_history_metadata')
+            elif 'session_history_media_info.' in c_where[0]:
+                count_join_tables.add('session_history_media_info')
+            elif c_where[0].startswith('media_type_live'):
+                count_join_tables.add('session_history_metadata')
+                count_alias = ', %s AS media_type_live' % media_type_live_case
+        count_joins = ''.join('JOIN %s ON %s.id = session_history.id ' % (t, t)
+                              for t in count_join_tables)
+        count_where, count_args = datatables.build_custom_where(
+            [[c[0], c[1]] for c in custom_where])
+
+        history_count = ("SELECT c FROM (SELECT COUNT(DISTINCT %s) AS c%s "
+                         "FROM session_history %s%s)"
+                         % (group_by[0], count_alias, count_joins, count_where))
+
+        if include_activity:
+            sessions_alias = ", (CASE WHEN live = 1 THEN 'live' ELSE media_type END) AS media_type_live"
+            sessions_where, sessions_args = datatables.build_custom_where(
+                [[c[0].split('.')[-1], c[1]] for c in custom_where])
+            sessions_count = ("SELECT c FROM (SELECT COUNT(DISTINCT session_key) AS c%s "
+                              "FROM sessions %s)" % (sessions_alias, sessions_where))
+            filtered_count_query = 'SELECT (%s) + (%s) AS filtered_count' % (history_count, sessions_count)
+            filtered_count_args = count_args + sessions_args
+        else:
+            filtered_count_query = 'SELECT (%s) AS filtered_count' % history_count
+            filtered_count_args = count_args
+
         try:
             query = data_tables.ssp_query(table_name='session_history',
                                           table_name_union=table_name_union,
@@ -216,15 +255,12 @@ class DataFactory(object):
                                           join_evals=[['session_history.user_id', 'users.user_id'],
                                                       ['session_history.id', 'session_history_metadata.id'],
                                                       ['session_history.id', 'session_history_media_info.id']],
+                                          filtered_count_query=filtered_count_query,
+                                          filtered_count_args=filtered_count_args,
                                           kwargs=kwargs)
         except Exception as e:
             logger.warn("Tautulli DataFactory :: Unable to execute database query for get_history: %s." % e)
-            return {'recordsFiltered': 0,
-                    'recordsTotal': 0,
-                    'draw': 0,
-                    'data': [],
-                    'filter_duration': '0',
-                    'total_duration': '0'}
+            return
 
         history = query['result']
 
@@ -366,20 +402,25 @@ class DataFactory(object):
         where_timeframe = ''
         where_timeframe_args = []
         if before:
-            where_timeframe += "AND strftime('%%Y-%%m-%%d', datetime(started, 'unixepoch', 'localtime')) <= '?' "
-            where_timeframe_args.append(before)
+            where_timeframe += "AND session_history.started <= ? "
+            before_timestamp = helpers.YMD_to_timestamp(before)
+            where_timeframe_args.append(before_timestamp)
             if not after:
-                timestamp = helpers.YMD_to_timestamp(before) - time_range * 24 * 60 * 60
-                where_timeframe += "AND session_history.stopped >= %s " % timestamp
+                after = helpers.YMD_to_timestamp(before) - time_range * 24 * 60 * 60
+                where_timeframe += "AND session_history.stopped >= ? "
+                where_timeframe_args.append(after)
         if after:
-            where_timeframe += "AND strftime('%%Y-%%m-%%d', datetime(started, 'unixepoch', 'localtime')) >= '?' "
-            where_timeframe_args.append(after)
+            where_timeframe += "AND session_history.started >= ? "
+            after_timestamp = helpers.YMD_to_timestamp(after)
+            where_timeframe_args.append(after_timestamp)
             if not before:
-                timestamp = helpers.YMD_to_timestamp(after) + time_range * 24 * 60 * 60
-                where_timeframe += "AND session_history.stopped <= %s " % timestamp
+                before = helpers.YMD_to_timestamp(after) + time_range * 24 * 60 * 60
+                where_timeframe += "AND session_history.stopped <= ? "
+                where_timeframe_args.append(before)
         if not (before and after):
             timestamp = helpers.timestamp() - time_range * 24 * 60 * 60
-            where_timeframe += "AND session_history.stopped >= %s" % timestamp
+            where_timeframe += "AND session_history.stopped >= ? "
+            where_timeframe_args.append(timestamp)
 
         where_id = ''
         where_id_args = []
@@ -1122,7 +1163,10 @@ class DataFactory(object):
             return home_stats[0]
         return home_stats
 
-    def get_library_stats(self, library_cards=[]):
+    def get_library_stats(self, library_cards=None):
+        if library_cards is None:
+            library_cards = []
+
         monitor_db = database.MonitorDatabase()
 
         if session.get_session_shared_libraries():
@@ -1479,7 +1523,8 @@ class DataFactory(object):
                 pre_tautulli = 1
 
             stream_output = {'bitrate': item['bitrate'],
-                             'video_full_resolution': item['video_full_resolution'],
+                             'video_full_resolution': common.VIDEO_RESOLUTION_OVERRIDES.get(
+                                 item['video_full_resolution'], item['video_full_resolution']),
                              'optimized_version': item['optimized_version'],
                              'optimized_version_profile': item['optimized_version_profile'],
                              'optimized_version_title': item['optimized_version_title'],
@@ -1502,7 +1547,8 @@ class DataFactory(object):
                              'subtitle_forced': item['subtitle_forced'],
                              'subtitle_language': item['subtitle_language'],
                              'stream_bitrate': item['stream_bitrate'],
-                             'stream_video_full_resolution': item['stream_video_full_resolution'],
+                             'stream_video_full_resolution': common.VIDEO_RESOLUTION_OVERRIDES.get(
+                                 item['stream_video_full_resolution'], item['stream_video_full_resolution']),
                              'quality_profile': item['quality_profile'],
                              'stream_container_decision': item['stream_container_decision'],
                              'stream_container': item['stream_container'],
@@ -1599,7 +1645,8 @@ class DataFactory(object):
                            'bitrate': item['bitrate'],
                            'video_codec': item['video_codec'],
                            'video_resolution': item['video_resolution'],
-                           'video_full_resolution': item['video_full_resolution'],
+                           'video_full_resolution': common.VIDEO_RESOLUTION_OVERRIDES.get(
+                               item['video_full_resolution'], item['video_full_resolution']),
                            'video_framerate': item['video_framerate'],
                            'audio_codec': item['audio_codec'],
                            'audio_channels': item['audio_channels'],
@@ -1658,19 +1705,36 @@ class DataFactory(object):
             return []
 
     def get_total_duration(self, custom_where=None):
+        if custom_where is None:
+            custom_where = []
+
         monitor_db = database.MonitorDatabase()
+
+        join_tables = set()
+        media_type_live = ''
+
+        for c_where in custom_where:
+            if 'session_history_metadata.' in c_where[0]:
+                join_tables.add('session_history_metadata')
+            elif 'session_history_media_info.' in c_where[0]:
+                join_tables.add('session_history_media_info')
+            elif c_where[0].startswith('media_type_live'):
+                join_tables.add('session_history_metadata')
+                media_type_live = (
+                    ", (CASE WHEN session_history_metadata.live = 1 THEN 'live' ELSE session_history.media_type END) "
+                    "AS media_type_live"
+                )
+
+        joins = ''
+        for table in join_tables:
+            joins += f"JOIN {table} ON {table}.id = session_history.id "
 
         where, args = datatables.build_custom_where(custom_where=custom_where)
 
         try:
             query = "SELECT SUM(CASE WHEN stopped > 0 THEN (stopped - started) ELSE 0 END) - " \
-                    "SUM(CASE WHEN paused_counter IS NULL THEN 0 ELSE paused_counter END) AS total_duration, " \
-                    "(CASE WHEN session_history_metadata.live = 1 THEN 'live' ELSE session_history.media_type END) " \
-                    "AS media_type_live " \
-                    "FROM session_history " \
-                    "JOIN session_history_metadata ON session_history_metadata.id = session_history.id " \
-                    "JOIN session_history_media_info ON session_history_media_info.id = session_history.id " \
-                    "%s " % where
+                    "SUM(CASE WHEN paused_counter IS NULL THEN 0 ELSE paused_counter END) AS total_duration %s " \
+                    "FROM session_history %s %s" % (media_type_live, joins, where)
             result = monitor_db.select(query, args=args)
         except Exception as e:
             logger.warn("Tautulli DataFactory :: Unable to execute database query for get_total_duration: %s." % e)
@@ -1793,7 +1857,7 @@ class DataFactory(object):
         monitor_db = database.MonitorDatabase()
 
         if not delete_all:
-            service = helpers.get_img_service()
+            service = service or helpers.get_img_service()
 
         if not rating_key and not delete_all:
             logger.error("Tautulli DataFactory :: Unable to delete hosted images: rating_key not provided.")
@@ -1821,9 +1885,10 @@ class DataFactory(object):
 
             logger.info("Tautulli DataFactory :: Deleting Imgur info%s from the database."
                         % log_msg)
-            result = monitor_db.action("DELETE FROM imgur_lookup WHERE img_hash "
-                                       "IN (SELECT img_hash FROM image_hash_lookup %s)" % where,
-                                       args)
+            monitor_db.action("DELETE FROM imgur_lookup WHERE img_hash "
+                              "IN (SELECT img_hash FROM image_hash_lookup %s)" % where,
+                              args)
+            return service
 
         elif service.lower() == 'cloudinary':
             # Delete from Cloudinary
@@ -1840,15 +1905,15 @@ class DataFactory(object):
 
             logger.info("Tautulli DataFactory :: Deleting Cloudinary info%s from the database."
                         % log_msg)
-            result = monitor_db.action("DELETE FROM cloudinary_lookup WHERE img_hash "
-                                       "IN (SELECT img_hash FROM image_hash_lookup %s)" % where,
-                                       args)
+            monitor_db.action("DELETE FROM cloudinary_lookup WHERE img_hash "
+                              "IN (SELECT img_hash FROM image_hash_lookup %s)" % where,
+                              args)
+            return service
 
         else:
             logger.error("Tautulli DataFactory :: Unable to delete hosted images: invalid service '%s' provided."
                          % service)
-
-        return service
+            return None
 
     def get_poster_info(self, rating_key='', metadata=None, service=None):
         poster_key = ''
@@ -2286,10 +2351,7 @@ class DataFactory(object):
                                           kwargs=kwargs)
         except Exception as e:
             logger.warn("Tautulli DataFactory :: Unable to execute database query for get_notification_log: %s." % e)
-            return {'recordsFiltered': 0,
-                    'recordsTotal': 0,
-                    'draw': 0,
-                    'data': []}
+            return
 
         notifications = query['result']
 
@@ -2364,10 +2426,7 @@ class DataFactory(object):
                                           kwargs=kwargs)
         except Exception as e:
             logger.warn("Tautulli DataFactory :: Unable to execute database query for get_newsletter_log: %s." % e)
-            return {'recordsFiltered': 0,
-                    'recordsTotal': 0,
-                    'draw': 0,
-                    'data': []}
+            return
 
         newsletters = query['result']
 

@@ -146,21 +146,6 @@ def notify_conditions(notify_action=None, stream_data=None, timeline_data=None, 
 
     # Activity notifications
     if stream_data:
-        # Check if notifications enabled for user and library
-        # user_data = users.Users()
-        # user_details = user_data.get_details(user_id=stream_data['user_id'])
-        #
-        # library_data = libraries.Libraries()
-        # library_details = library_data.get_details(section_id=stream_data['section_id'])
-
-        # if not user_details['do_notify']:
-        #     logger.debug("Tautulli NotificationHandler :: Notifications for user '%s' are disabled." % user_details['username'])
-        #     return False
-        #
-        # elif not library_details['do_notify'] and notify_action not in ('on_concurrent', 'on_newdevice'):
-        #     logger.debug("Tautulli NotificationHandler :: Notifications for library '%s' are disabled." % library_details['section_name'])
-        #     return False
-
         if notify_action == 'on_concurrent':
             pms_connect = pmsconnect.PmsConnect()
             result = pms_connect.get_current_activity()
@@ -209,14 +194,6 @@ def notify_conditions(notify_action=None, stream_data=None, timeline_data=None, 
 
     # Recently Added notifications
     elif timeline_data:
-
-        # Check if notifications enabled for library
-        # library_data = libraries.Libraries()
-        # library_details = library_data.get_details(section_id=timeline_data['section_id'])
-        #
-        # if not library_details['do_notify_created']:
-        #     # logger.debug("Tautulli NotificationHandler :: Notifications for library '%s' is disabled." % library_details['section_name'])
-        #     return False
 
         evaluated = True
 
@@ -876,7 +853,7 @@ def build_media_notify_params(notify_action=None, session=None, timeline=None, m
 
     img_service = helpers.get_img_service(include_self=True)
     fallback = 'poster-live' if notify_params['live'] else 'poster'
-    if img_service not in (None, 'self-hosted'):
+    if img_service not in ('', 'self-hosted'):
         img_info = get_img_info(img=poster_thumb, rating_key=poster_key, title=poster_title, fallback=fallback)
         poster_info = {'poster_title': img_info['img_title'], 'poster_url': img_info['img_url']}
         notify_params.update(poster_info)
@@ -1082,7 +1059,8 @@ def build_media_notify_params(notify_action=None, session=None, timeline=None, m
         'stream_video_dovi_level': notify_params['stream_video_dovi_level'],
         'stream_video_dovi_profile': notify_params['stream_video_dovi_profile'],
         'stream_video_framerate': notify_params['stream_video_framerate'],
-        'stream_video_full_resolution': notify_params['stream_video_full_resolution'],
+        'stream_video_full_resolution': common.VIDEO_RESOLUTION_OVERRIDES.get(
+            notify_params['stream_video_full_resolution'], notify_params['stream_video_full_resolution']),
         'stream_video_ref_frames': notify_params['stream_video_ref_frames'],
         'stream_video_resolution': notify_params['stream_video_resolution'],
         'stream_video_scan_type': notify_params['stream_video_scan_type'],
@@ -1099,6 +1077,7 @@ def build_media_notify_params(notify_action=None, session=None, timeline=None, m
         'stream_audio_language': notify_params['stream_audio_language'],
         'stream_audio_language_code': notify_params['stream_audio_language_code'],
         'stream_audio_profile': notify_params['stream_audio_profile'],
+        'stream_audio_atmos': notify_params['stream_audio_atmos'],
         'stream_subtitle_codec': notify_params['stream_subtitle_codec'],
         'stream_subtitle_container': notify_params['stream_subtitle_container'],
         'stream_subtitle_format': notify_params['stream_subtitle_format'],
@@ -1219,7 +1198,8 @@ def build_media_notify_params(notify_action=None, session=None, timeline=None, m
         'video_dovi_level': notify_params['video_dovi_level'],
         'video_dovi_profile': notify_params['video_dovi_profile'],
         'video_framerate': notify_params['video_framerate'],
-        'video_full_resolution': notify_params['video_full_resolution'],
+        'video_full_resolution': common.VIDEO_RESOLUTION_OVERRIDES.get(
+            notify_params['video_full_resolution'], notify_params['video_full_resolution']),
         'video_ref_frames': notify_params['video_ref_frames'],
         'video_resolution': notify_params['video_resolution'],
         'video_scan_type': notify_params['video_scan_type'],
@@ -1236,6 +1216,7 @@ def build_media_notify_params(notify_action=None, session=None, timeline=None, m
         'audio_language': notify_params['audio_language'],
         'audio_language_code': notify_params['audio_language_code'],
         'audio_profile': notify_params['audio_profile'],
+        'audio_atmos': notify_params['audio_atmos'],
         'subtitle_codec': notify_params['subtitle_codec'],
         'subtitle_container': notify_params['subtitle_container'],
         'subtitle_format': notify_params['subtitle_format'],
@@ -1550,7 +1531,7 @@ def get_img_info(img=None, rating_key=None, title='', width=1000, height=1500,
 
     service = helpers.get_img_service()
 
-    if service is None:
+    if service == '':
         return img_info
 
     elif service == 'cloudinary':

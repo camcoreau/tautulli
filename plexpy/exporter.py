@@ -445,6 +445,7 @@ class Export(object):
                 'contentRating': None,
                 'duration': None,
                 'durationHuman': lambda o: helpers.human_duration(getattr(o, 'duration', 0)),
+                'editionTitle': None,
                 'enableCreditsMarkerGeneration': None,
                 'episodeSort': None,
                 'fields': {
@@ -532,6 +533,7 @@ class Export(object):
                     'id': None,
                     'tag': None
                 },
+                'editionTitle': None,
                 'fields': {
                     'name': None,
                     'locked': None
@@ -618,6 +620,7 @@ class Export(object):
                 },
                 'duration': None,
                 'durationHuman': lambda o: helpers.human_duration(getattr(o, 'duration', 0)),
+                'editionTitle': None,
                 'episodeNumber': None,
                 'fields': {
                     'name': None,
@@ -1489,7 +1492,7 @@ class Export(object):
             _media_type = 'show'
             _metadata_levels = {
                 1: [
-                    'ratingKey', 'title', 'titleSort', 'originallyAvailableAt', 'originalTitle', 'year', 'addedAt',
+                    'ratingKey', 'title', 'titleSort', 'originallyAvailableAt', 'originalTitle', 'editionTitle', 'year', 'addedAt',
                     'rating', 'audienceRating', 'audienceRatingImage', 'userRating', 'contentRating', 'network',
                     'studio', 'tagline', 'summary', 'guid', 'duration', 'durationHuman', 'type', 'childCount', 'seasonCount',
                     'seasons'
@@ -2582,11 +2585,6 @@ def cancel_exports():
 
 
 def get_export_datatable(section_id=None, user_id=None, rating_key=None, kwargs=None):
-    default_return = {'recordsFiltered': 0,
-                      'recordsTotal': 0,
-                      'draw': 0,
-                      'data': []}
-
     data_tables = datatables.DataTables()
 
     custom_where = []
@@ -2633,7 +2631,7 @@ def get_export_datatable(section_id=None, user_id=None, rating_key=None, kwargs=
                                       kwargs=kwargs)
     except Exception as e:
         logger.warn("Tautulli Exporter :: Unable to execute database query for get_export_datatable: %s.", e)
-        return default_return
+        return
 
     result = query['result']
 
@@ -2719,7 +2717,7 @@ def get_custom_fields(media_type, sub_media_type=None):
 
     collection_sub_media_types = {'movie', 'show', 'artist', 'album', 'photoalbum'}
     playlist_sub_media_types = {'video', 'audio', 'photo'}
-    sub_media_type = {s.strip().lower() for s in sub_media_type.split(',')}
+    sub_media_type = {s.strip().lower() for s in (sub_media_type or '').split(',')}
 
     export = Export()
 

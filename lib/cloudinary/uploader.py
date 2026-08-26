@@ -11,7 +11,7 @@ import cloudinary
 from cloudinary import utils
 from cloudinary.api_client.execute_request import EXCEPTION_CODES
 from cloudinary.cache.responsive_breakpoints_cache import instance as responsive_breakpoints_cache_instance
-from cloudinary.exceptions import Error
+from cloudinary.exceptions import Error, AuthorizationRequired
 from cloudinary.utils import build_eager
 
 try:
@@ -157,6 +157,8 @@ def upload(file, **options):
         If True, performs analysis for cinemagraph creation.
     :keyword bool accessibility_analysis:
         If True, performs accessibility (image alt text) analysis.
+    :keyword str batch_id:
+        The batch identifier used to retrieve notifications from a `poll://*` destination.
     :keyword int timestamp:
         A UNIX timestamp to sign the request. Defaults to now().
     :keyword dict or list transformation:
@@ -262,6 +264,32 @@ def upload_resource(file, **options):
     )
 
 
+def _upload_large_part_with_auth_retry(file, http_headers, options):
+    """
+    Uploads a single chunk, recovering once from an expired OAuth token via the
+    optional oauth_token_refresh_callback config hook. Retries the same chunk
+    (same http_headers, so same X-Unique-Upload-Id) to resume the upload.
+
+    :param file: The chunk to upload.
+    :param http_headers: Per-chunk headers, reused on retry.
+    :param options: Upload options (must not contain an oauth_token key).
+    :return: The result of the chunk upload API call.
+    :rtype: dict
+    """
+    # Pin the token so the value handed to the callback is the one actually sent.
+    token = cloudinary.config().oauth_token
+    pinned = dict(options, oauth_token=token) if token else options
+    try:
+        return upload_large_part(file, http_headers=http_headers, **pinned)
+    except AuthorizationRequired:
+        callback = cloudinary.config().oauth_token_refresh_callback
+        if not callback:
+            raise
+        callback(token)
+        # Retry with the original options so call_api re-reads the refreshed token from config.
+        return upload_large_part(file, http_headers=http_headers, **options)
+
+
 def upload_large(file, **options):
     """
     Uploads a large file (in chunks) to Cloudinary.
@@ -308,7 +336,9 @@ def upload_large(file, **options):
                 "X-Unique-Upload-Id": upload_id
             }
 
-            upload_result = upload_large_part((file_name, chunk), http_headers=http_headers, **options)
+            upload_result = _upload_large_part_with_auth_retry(
+                (file_name, chunk), http_headers, options
+            )
 
             options["public_id"] = upload_result.get("public_id")
 
@@ -906,18 +936,27 @@ def call_api(action, params, http_headers=None, return_error=False, unsigned=Fal
     except socket.error as e:
         raise Error("Socket error: {0!r}".format(e))
 
+    request_id = response.headers.get("x-request-id")
+
     try:
         result = json.loads(response.data.decode('utf-8'))
     except Exception as e:
-        raise Error("Error parsing server response ({0}) - {1}. Got - {2}"
-                    .format(response.status, response.data, e))
+        message = "Error parsing server response ({0}) - {1}. Got - {2}".format(
+            response.status, response.data, e)
+        if request_id:
+            message += ". Request ID: {0}".format(request_id)
+        raise Error(message)
 
     if "error" in result:
         if return_error:
             result["error"]["http_code"] = response.status
+            result["error"]["request_id"] = request_id
             return result
 
         exception_class = EXCEPTION_CODES.get(response.status) or Error
         raise exception_class(result["error"]["message"])
+
+    if request_id:
+        result["request_id"] = request_id
 
     return result

@@ -213,6 +213,12 @@ def integrity_check():
     return result
 
 
+def quick_check():
+    monitor_db = MonitorDatabase()
+    result = monitor_db.select_single("PRAGMA quick_check")
+    return result
+
+
 def clear_table(table=None):
     if table:
         monitor_db = MonitorDatabase()
@@ -220,7 +226,6 @@ def clear_table(table=None):
         logger.debug("Tautulli Database :: Clearing database table '%s'." % table)
         try:
             monitor_db.action("DELETE FROM %s" % table)
-            vacuum()
             return True
         except Exception as e:
             logger.error("Tautulli Database :: Failed to clear database table '%s': %s." % (table, e))
@@ -258,7 +263,6 @@ def delete_rows_from_table(table, row_ids):
             for row_ids_group in helpers.chunk(row_ids, sqlite_max_variable_number):
                 query = "DELETE FROM " + table + " WHERE id IN (%s) " % ','.join(['?'] * len(row_ids_group))
                 monitor_db.action(query, row_ids_group)
-            vacuum()
         except Exception as e:
             logger.error("Tautulli Database :: Failed to delete rows from %s database table: %s" % (table, e))
             return False
@@ -302,9 +306,12 @@ def delete_library_history(section_id=None):
 def vacuum():
     monitor_db = MonitorDatabase()
 
-    logger.info("Tautulli Database :: Vacuuming database.")
     try:
-        monitor_db.action("VACUUM")
+        freelist_count = monitor_db.select_single("PRAGMA freelist_count").get('freelist_count', 0)
+        page_count = monitor_db.select_single("PRAGMA page_count").get('page_count', 0)
+        if page_count > 0 and freelist_count / page_count >= 0.20:
+            logger.info("Tautulli Database :: Vacuuming database.")
+            monitor_db.action("VACUUM")
     except Exception as e:
         logger.error("Tautulli Database :: Failed to vacuum database: %s" % e)
 
@@ -335,7 +342,7 @@ def make_backup(cleanup=False, scheduler=False):
     """ Makes a backup of db, removes all but the last 5 backups """
 
     # Check the integrity of the database first
-    integrity = (integrity_check()['integrity_check'] == 'ok')
+    integrity = (quick_check()['quick_check'] == 'ok')
 
     corrupt = ''
     if not integrity:
@@ -353,11 +360,19 @@ def make_backup(cleanup=False, scheduler=False):
     if not os.path.exists(backup_folder):
         os.makedirs(backup_folder)
 
+    snapshot = os.path.join(backup_folder, 'tautulli.snapshot.db')
+    dest = sqlite3.connect(snapshot)
     db = MonitorDatabase()
-    db.connection.execute("BEGIN IMMEDIATE")
+    db.connection.backup(dest)
+    dest.close()
+
     with zipfile.ZipFile(backup_file_fp, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        zipf.write(db_filename(), arcname=FILENAME)
-    db.connection.rollback()
+        zipf.write(snapshot, arcname=FILENAME)
+
+    try:
+        os.remove(snapshot)
+    except OSError as e:
+        logger.error("Tautulli Database :: Failed to delete %s from the backup folder: %s" % (snapshot, e))
 
     # Only cleanup if the database integrity is okay
     if cleanup and integrity:
