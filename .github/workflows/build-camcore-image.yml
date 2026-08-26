@@ -61,6 +61,29 @@ jobs:
           grep -F "What's new on Cameron-Media" plexpy/newsletters.py
           grep -F "CAMCORE MEDIA • INSIGHTS" plexpy/notifiers.py
 
+      - name: Prepare exact CamCore artwork for image validation
+        if: github.ref != 'refs/heads/master'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat camcore-branding/dark-logo.b64.* \
+            | tr -d '\r\n' \
+            | base64 --decode \
+            > camcore-branding/camcore-logo-dark.png
+
+          cat camcore-branding/light-logo.b64.* \
+            | tr -d '\r\n' \
+            | base64 --decode \
+            > camcore-branding/camcore-logo-light.png
+
+          echo "58d436201eff1ed379c8f3a1bfb818ef403fee75d188a8a6d478df65646232af  camcore-branding/camcore-logo-dark.png" | sha256sum --check
+          echo "9a8f29b247fcdfd670c58f48b7aa760e157fa8e042b8f8ffd9164c1bfa03fff0  camcore-branding/camcore-logo-light.png" | sha256sum --check
+
+      - name: Build CamCore image without publishing
+        if: github.ref != 'refs/heads/master'
+        run: docker build --pull --file Dockerfile.camcore --tag camcore-tautulli:validation .
+
       - name: Validate Cameron-Media account audit
         run: |
           python3 -m py_compile camcore-account-audit/audit.py
