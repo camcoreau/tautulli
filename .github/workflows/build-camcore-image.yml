@@ -7,6 +7,11 @@ on:
       - 'agent/**'
     paths-ignore:
       - '**/*.md'
+  pull_request:
+    branches:
+      - master
+    paths-ignore:
+      - '**/*.md'
   workflow_dispatch:
 
 permissions:
@@ -65,6 +70,15 @@ jobs:
           node --check youtrack-workflows/cma-account-review/lifecycle-transitions.js
           node --check youtrack-workflows/cma-account-review/notice-escalation.js
           node --check youtrack-workflows/cma-account-review/deadline-transitions.js
+          node --check youtrack-workflows/cma-account-review/communications.js
+          node --check youtrack-workflows/cma-account-review/stage-communications.js
+          node --check youtrack-workflows/cma-account-review/lifecycle-catchup.js
+          node --check youtrack-workflows/cma-account-review/communication-catchup.js
+          node --check youtrack-workflows/cma-account-review/reporter-replies.js
+          node youtrack-workflows/cma-account-review/tests/test-communications.js
+          node youtrack-workflows/cma-account-review/tests/test-reporter-replies.js
+          node youtrack-workflows/cma-account-review/tests/test-lifecycle-transitions.js
+          node youtrack-workflows/cma-account-review/tests/test-lifecycle-catchup.js
 
   build-and-publish:
     name: Build and publish AMD64 image
@@ -187,3 +201,4 @@ jobs:
           cache-from: type=gha,scope=cma-account-audit-amd64
           cache-to: type=gha,mode=max,scope=cma-account-audit-amd64
           provenance: false
+

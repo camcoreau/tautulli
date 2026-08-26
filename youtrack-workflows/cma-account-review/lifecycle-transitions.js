@@ -1,20 +1,16 @@
 const entities = require('@jetbrains/youtrack-scripting-api/entities');
 const dateTime = require('@jetbrains/youtrack-scripting-api/date-time');
 
-const REVIEW_TIME_ZONE = 'Australia/Melbourne';
+function sevenDaysFromNow() {
+  return dateTime.after(Date.now(), '7d');
+}
 
-function sevenDaysFromToday() {
-  const targetDate = dateTime.format(
-    dateTime.after(Date.now(), '7d'),
-    'yyyy-MM-dd',
-    REVIEW_TIME_ZONE
-  );
-
-  return dateTime.parse(
-    targetDate + ' 12:00',
-    'yyyy-MM-dd HH:mm',
-    'UTC'
-  );
+function setReviewerWhenAvailable(issue, ctx) {
+  const field = issue.project.findFieldByName(ctx.ReviewedBy.name);
+  const reviewer = field && field.findValueByLogin(ctx.currentUser.login);
+  if (reviewer) {
+    issue.fields.ReviewedBy = reviewer;
+  }
 }
 
 exports.rule = entities.Issue.onChange({
@@ -27,8 +23,12 @@ exports.rule = entities.Issue.onChange({
       issue.fields.InactivityNoticeSent = Date.now();
       issue.fields.Outcome = ctx.Outcome.Pending;
       issue.fields.State = ctx.State.Pending;
+      issue.fields.RemovalReason = issue.fields.is(
+        ctx.AccountStatus,
+        ctx.AccountStatus.NeverUsed
+      ) ? ctx.RemovalReason.NeverUsed : ctx.RemovalReason.Inactivity;
     } else if (issue.fields.becomes(ctx.ReviewStage, ctx.ReviewStage.SubjectToDeletion)) {
-      issue.fields.GracePeriodEnds = sevenDaysFromToday();
+      issue.fields.GracePeriodEnds = sevenDaysFromNow();
       issue.fields.Outcome = ctx.Outcome.Pending;
       issue.fields.State = ctx.State.Pending;
     } else if (issue.fields.becomes(ctx.ReviewStage, ctx.ReviewStage.AccessRetained)) {
@@ -38,9 +38,11 @@ exports.rule = entities.Issue.onChange({
       issue.fields.Outcome = ctx.Outcome.Removed;
       issue.fields.RemovalCompleted = Date.now();
       issue.fields.State = ctx.State.Solved;
+      setReviewerWhenAvailable(issue, ctx);
     } else if (issue.fields.becomes(ctx.ReviewStage, ctx.ReviewStage.Exempt)) {
       issue.fields.Outcome = ctx.Outcome.Exempt;
       issue.fields.State = ctx.State.Solved;
+      setReviewerWhenAvailable(issue, ctx);
     }
   },
   requirements: {
@@ -71,6 +73,21 @@ exports.rule = entities.Issue.onChange({
     RemovalCompleted: {
       type: entities.Field.dateType,
       name: 'Removal Completed'
+    },
+    AccountStatus: {
+      type: entities.EnumField.fieldType,
+      name: 'Account Status',
+      NeverUsed: {name: 'Never Used'}
+    },
+    RemovalReason: {
+      type: entities.EnumField.fieldType,
+      name: 'Removal Reason',
+      Inactivity: {},
+      NeverUsed: {name: 'Never Used'}
+    },
+    ReviewedBy: {
+      type: entities.User.fieldType,
+      name: 'Reviewed By'
     },
     State: {
       type: entities.State.fieldType,
