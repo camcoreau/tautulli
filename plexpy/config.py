@@ -46,7 +46,6 @@ _CONFIG_DEFINITIONS = {
     'PMS_CLIENT_ID': (str, 'PMS', ''),
     'PMS_IDENTIFIER': (str, 'PMS', ''),
     'PMS_IP': (str, 'PMS', '127.0.0.1'),
-    'PMS_IS_CLOUD': (int, 'PMS', 0),
     'PMS_IS_REMOTE': (int, 'PMS', 0),
     'PMS_LANGUAGE': (str, 'PMS', ''),
     'PMS_LOGS_FOLDER': (str, 'PMS', ''),
@@ -183,6 +182,7 @@ _CONFIG_DEFINITIONS = {
     'REFRESH_LIBRARIES_ON_STARTUP': (int, 'Monitoring', 1),
     'REFRESH_USERS_INTERVAL': (int, 'Monitoring', 12),
     'REFRESH_USERS_ON_STARTUP': (int, 'Monitoring', 1),
+    'REMOTE_APP_PUSH_URL': (str, 'Advanced', 'https://relay.tautulliremote.com'),
     'SESSION_DB_WRITE_ATTEMPTS': (int, 'Advanced', 5),
     'SHOW_ADVANCED_SETTINGS': (int, 'General', 0),
     'SYNCHRONOUS_MODE': (str, 'Advanced', 'NORMAL'),
@@ -192,7 +192,6 @@ _CONFIG_DEFINITIONS = {
     'TV_WATCHED_PERCENT': (int, 'Monitoring', 85),
     'UPDATE_DB_INTERVAL': (int, 'General', 24),
     'UPDATE_SHOW_CHANGELOG': (int, 'General', 1),
-    'UPGRADE_FLAG': (int, 'Advanced', 0),
     'VERBOSE_LOGS': (int, 'Advanced', 1),
     'VERIFY_SSL_CERT': (bool_int, 'Advanced', 1),
     'WATCHED_MARKER': (int, 'Monitoring', 3),
@@ -278,7 +277,6 @@ SETTINGS = [
     'PMS_CLIENT_ID',
     'PMS_IDENTIFIER',
     'PMS_IP',
-    'PMS_IS_CLOUD',
     'PMS_IS_REMOTE',
     'PMS_LOGS_FOLDER',
     'PMS_NAME',
@@ -336,6 +334,7 @@ CHECKED_SETTINGS = [
     'THEMOVIEDB_LOOKUP',
     'TVMAZE_LOOKUP',
     'WEEK_START_MONDAY',
+    'SYSTEM_ANALYTICS',
 ]
 
 

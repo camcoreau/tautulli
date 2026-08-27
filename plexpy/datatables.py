@@ -14,11 +14,17 @@
 #  along with Tautulli.  If not, see <http://www.gnu.org/licenses/>.
 
 import re
+import sqlite3
 
 import plexpy
 from plexpy import database
 from plexpy import helpers
 from plexpy import logger
+
+# COUNT(*) OVER () lets the filtered count ride along with the page query
+# so the (potentially expensive) inner query is materialized once per
+# draw instead of twice
+_WINDOW_FUNCTIONS_SUPPORTED = sqlite3.sqlite_version_info >= (3, 25, 0)
 
 
 class DataTables(object):
@@ -32,20 +38,41 @@ class DataTables(object):
     def ssp_query(self,
                   table_name=None,
                   table_name_union=None,
-                  columns=[],
-                  columns_union=[],
-                  custom_where=[],
-                  custom_where_union=[],
-                  group_by=[],
-                  group_by_union=[],
-                  join_types=[],
-                  join_tables=[],
-                  join_evals=[],
+                  columns=None,
+                  columns_union=None,
+                  custom_where=None,
+                  custom_where_union=None,
+                  group_by=None,
+                  group_by_union=None,
+                  join_types=None,
+                  join_tables=None,
+                  join_evals=None,
+                  filtered_count_query=None,
+                  filtered_count_args=None,
                   kwargs=None):
 
         if not table_name:
             logger.error('Tautulli DataTables :: No table name received.')
             return None
+        
+        if columns is None:
+            columns = []
+        if columns_union is None:
+            columns_union = []
+        if custom_where is None:
+            custom_where = []
+        if custom_where_union is None:
+            custom_where_union = []
+        if group_by is None:
+            group_by = []
+        if group_by_union is None:
+            group_by_union = []
+        if join_types is None:
+            join_types = []
+        if join_tables is None:
+            join_tables = []
+        if join_evals is None:
+            join_evals = []
 
         # Fetch all our parameters
         if kwargs.get('json_data'):
@@ -81,17 +108,58 @@ class DataTables(object):
 
         args = cw_args + cwu_args + w_args
 
-        # Build the query
-        query = 'SELECT * FROM (SELECT %s FROM %s %s %s %s %s) %s %s' \
-                % (extracted_columns['column_string'], table_name, join, c_where, group, union, where, order)
+        # Build the inner query
+        inner_query = 'SELECT %s FROM %s %s %s %s %s' \
+                      % (extracted_columns['column_string'], table_name, join, c_where, group, union)
 
-        # logger.debug("Query: %s" % query)
+        # Paginate using LIMIT and OFFSET so only the requested page is
+        # fetched from the database (LIMIT -1 returns all rows in SQLite)
+        start = helpers.cast_to_int(parameters.get('start', 0))
+        length = helpers.cast_to_int(parameters.get('length', -1))
+        if length < 0:
+            length = -1
 
-        # Execute the query
-        filtered = self.ssp_db.select(query, args=args)
+        if filtered_count_query and not where:
+            # The caller supplied an equivalent cheap count (e.g. group
+            # keys counted on the base tables without the 1:1 joins);
+            # valid whenever no search filter is active
+            filtered_count = self.ssp_db.select(
+                filtered_count_query, args=filtered_count_args or [])[0]['filtered_count']
+
+            query = 'SELECT * FROM (%s) %s %s LIMIT ? OFFSET ?' % (inner_query, where, order)
+            result = self.ssp_db.select(query, args=args + [length, start])
+        elif _WINDOW_FUNCTIONS_SUPPORTED:
+            # Compute the filtered count in the same statement as the page
+            query = 'SELECT *, COUNT(*) OVER () AS __filtered_count FROM (%s) %s %s LIMIT ? OFFSET ?' \
+                    % (inner_query, where, order)
+            result = self.ssp_db.select(query, args=args + [length, start])
+
+            if result:
+                filtered_count = result[0]['__filtered_count']
+                for row in result:
+                    del row['__filtered_count']
+            elif start > 0:
+                # Page requested beyond the end of the result set; only
+                # now pay for a separate count
+                filtered_count = self.ssp_db.select(
+                    'SELECT COUNT(*) AS filtered_count FROM (%s) %s' % (inner_query, where),
+                    args=args)[0]['filtered_count']
+            else:
+                filtered_count = 0
+        else:
+            # Get the number of filtered rows
+            filtered_count = self.ssp_db.select(
+                'SELECT COUNT(*) AS filtered_count FROM (%s) %s' % (inner_query, where),
+                args=args)[0]['filtered_count']
+
+            # Build the query
+            query = 'SELECT * FROM (%s) %s %s LIMIT ? OFFSET ?' % (inner_query, where, order)
+
+            # Execute the query
+            result = self.ssp_db.select(query, args=args + [length, start])
 
         # Remove NULL rows
-        filtered = [row for row in filtered if not all(v is None for v in row.values())]
+        result = [row for row in result if not all(v is None for v in row.values())]
 
         # Build grand totals
         totalcount = self.ssp_db.select('SELECT COUNT(id) as total_count from %s' % table_name)[0]['total_count']
@@ -99,18 +167,18 @@ class DataTables(object):
         # Get draw counter
         draw_counter = int(parameters['draw'])
 
-        # Paginate results
-        result = filtered[parameters['start']:(parameters['start'] + parameters['length'])]
-
         output = {'result': result,
                   'draw': draw_counter,
-                  'filteredCount': len(filtered),
+                  'filteredCount': filtered_count,
                   'totalCount': totalcount}
 
         return output
 
 
-def build_grouping(group_by=[]):
+def build_grouping(group_by=None):
+    if group_by is None:
+        group_by = []
+
     # Build grouping
     group = ''
 
@@ -122,7 +190,14 @@ def build_grouping(group_by=[]):
     return group
 
 
-def build_join(join_types=[], join_tables=[], join_evals=[]):
+def build_join(join_types=None, join_tables=None, join_evals=None):
+    if join_types is None:
+        join_types = []
+    if join_tables is None:
+        join_tables = []
+    if join_evals is None:
+        join_evals = []
+
     # Build join parameters
     join = ''
 
@@ -135,7 +210,10 @@ def build_join(join_types=[], join_tables=[], join_evals=[]):
     return join
 
 
-def build_custom_where(custom_where=[]):
+def build_custom_where(custom_where=None):
+    if custom_where is None:
+        custom_where = []
+
     # Build custom where parameters
     c_where = ''
     args = []
@@ -145,7 +223,7 @@ def build_custom_where(custom_where=[]):
         w[0] = w[0].rstrip(' OR')
 
         if w[0].endswith(' IN') and isinstance(w[1], (list, tuple)) and len(w[1]):
-            c_where += w[0] + '(' + ','.join(['?'] * len(w[1])) + ')' + and_or
+            c_where += w[0] + ' (' + ','.join(['?'] * len(w[1])) + ')' + and_or
             args += w[1]
         elif isinstance(w[1], (list, tuple)) and len(w[1]):
             c_where += '('
@@ -184,7 +262,14 @@ def build_custom_where(custom_where=[]):
     return c_where, args
 
 
-def build_order(order_param=[], columns=[], dt_columns=[]):
+def build_order(order_param=None, columns=None, dt_columns=None):
+    if order_param is None:
+        order_param = []
+    if columns is None:
+        columns = []
+    if dt_columns is None:
+        dt_columns = []
+
     # Build ordering
     order = ''
 
@@ -212,7 +297,12 @@ def build_order(order_param=[], columns=[], dt_columns=[]):
     return order
 
 
-def build_where(search_param='', columns=[], dt_columns=[]):
+def build_where(search_param='', columns=None, dt_columns=None):
+    if columns is None:
+        columns = []
+    if dt_columns is None:
+        dt_columns = []
+
     # Build where parameters
     where = ''
     args = []

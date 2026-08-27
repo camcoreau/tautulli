@@ -637,23 +637,15 @@ def add_notifier_config(agent_id=None, **kwargs):
         return False
 
 
-def set_notifier_config(notifier_id=None, agent_id=None, **kwargs):
-    if str(agent_id).isdigit():
-        agent_id = int(agent_id)
-    else:
-        logger.error("Tautulli Notifiers :: Unable to set existing notifier: invalid agent_id %s."
-                     % agent_id)
+def set_notifier_config(notifier_id=None, **kwargs):
+    notifier = get_notifier_config(notifier_id=notifier_id)
+    if not notifier:
+        logger.error("Tautulli Notifiers :: Unable to update notification agent: invalid notifier_id %s."
+                     % notifier_id)
         return False
-
-    agent = get_notify_agents(return_dict=True).get(agent_id, None)
-
-    if not agent:
-        logger.error("Tautulli Notifiers :: Unable to retrieve existing notification agent: invalid agent_id %s."
-                     % agent_id)
-        return False
-
+    
     notify_actions = get_notify_actions()
-    config_prefix = agent['name'] + '_'
+    config_prefix = notifier['agent_name'] + '_'
 
     actions = {k: helpers.cast_to_int(kwargs.pop(k))
                for k in list(kwargs.keys()) if k in notify_actions}
@@ -664,29 +656,32 @@ def set_notifier_config(notifier_id=None, agent_id=None, **kwargs):
     notifier_config = {k[len(config_prefix):]: kwargs.pop(k)
                        for k in list(kwargs.keys()) if k.startswith(config_prefix)}
 
-    for cfg, val in notifier_config.items():
-        # Check for a password config keys and a blank password from the HTML form
-        if 'password' in cfg and val == '    ':
-            # Get the previous password so we don't overwrite it with a blank value
-            old_notifier_config = get_notifier_config(notifier_id=notifier_id)
-            notifier_config[cfg] = old_notifier_config['config'][cfg]
+    for cfg, val in notifier['config'].items():
+        if cfg in notifier_config:
+            # Check for a password config keys and a blank password from the HTML form
+            # so we don't overwrite the existing password with a blank value
+            if 'password' in cfg and val == '    ':
+                continue
+            notifier['config'][cfg] = notifier_config[cfg]
 
-    agent_class = get_agent_class(agent_id=agent['id'], config=notifier_config)
-
-    custom_conditions = validate_conditions(kwargs.get('custom_conditions'))
-    if custom_conditions is False:
-        logger.error("Tautulli Notifiers :: Unable to update notification agent: Invalid custom conditions.")
-        return False
+    if friendly_name := kwargs.get('friendly_name'):
+        notifier['friendly_name'] = friendly_name
+    if custom_conditions := kwargs.get('custom_conditions'):
+        if validated_conditions := validate_conditions(custom_conditions):
+            notifier['custom_conditions'] = validated_conditions
+        else:
+            logger.error("Tautulli Notifiers :: Unable to update notification agent: Invalid custom conditions.")
+            return False
+    if custom_conditions_logic := kwargs.get('custom_conditions_logic'):
+        notifier['custom_conditions_logic'] = custom_conditions_logic
 
     keys = {'id': notifier_id}
-    values = {'agent_id': agent['id'],
-              'agent_name': agent['name'],
-              'agent_label': agent['label'],
-              'friendly_name': kwargs.get('friendly_name', ''),
-              'notifier_config': json.dumps(agent_class.config),
-              'custom_conditions': json.dumps(custom_conditions or DEFAULT_CUSTOM_CONDITIONS),
-              'custom_conditions_logic': kwargs.get('custom_conditions_logic', ''),
-              }
+    values = {
+        'friendly_name': notifier['friendly_name'],
+        'notifier_config': json.dumps(notifier['config']),
+        'custom_conditions': json.dumps(notifier['custom_conditions']),
+        'custom_conditions_logic': notifier['custom_conditions_logic'],
+    }
     values.update(actions)
     values.update(subject_text)
     values.update(body_text)
@@ -695,10 +690,10 @@ def set_notifier_config(notifier_id=None, agent_id=None, **kwargs):
     try:
         db.upsert(table_name='notifiers', key_dict=keys, value_dict=values)
         logger.info("Tautulli Notifiers :: Updated notification agent: %s (notifier_id %s)."
-                    % (agent['label'], notifier_id))
+                    % (notifier['agent_label'], notifier_id))
         blacklist_logger()
 
-        if agent['name'] == 'browser':
+        if notifier['agent_name'] == 'browser':
             check_browser_enabled()
 
         return True
@@ -4014,10 +4009,149 @@ class TAUTULLIREMOTEAPP(Notifier):
     Tautulli Remote app notifications
     """
     NAME = 'Tautulli Remote App'
+    MAX_DATA_BYTES = 3800  # the relay refuses a larger data object; FCM caps the message at 4096 bytes
+    TIMEOUT = 10  # notifications share a small worker pool, so a silent relay must not hold one open
     _DEFAULT_CONFIG = {'device_id': '',
                        'priority': 3,
                        'notification_type': 0
                        }
+
+    @staticmethod
+    def _device_label(device):
+        # Newlines would let a device name forge additional log entries.
+        device_name = ' '.join((device['friendly_name'] or device['device_name'] or '').split())
+        device_id = mobile_app.relay_device_id(device['push_token'])
+        # The id alone is a token hash, so name the device wherever one is recorded.
+        return f"'{device_name}' ({device_id})" if device_name else device_id     
+
+    @staticmethod
+    def _via_relay(device):
+        # Devices registered with a push token go through the relay; older ones through
+        # OneSignal. A device that opted out holds the sentinel rather than an empty token.
+        push_token = device['push_token']
+        return bool(push_token) and push_token != mobile_app._PUSH_DISABLED
+
+    def _trim_to_relay_limit(self, plaintext_data):
+        if _CRYPTOGRAPHY:
+            # Everything but the ciphertext; a 16 byte nonce or salt is 24 base64 characters.
+            envelope = {'encrypted': True, 'version': 2, 'cipher_text': '',
+                        'nonce': 'x' * 24, 'salt': 'x' * 24,
+                        'server_id': plexpy.CONFIG.PMS_UUID}
+            # base64 emits 4 characters per 3 bytes rounding up, so invert that rather than scaling by three quarters.
+            room = self.MAX_DATA_BYTES - len(json.dumps(envelope))
+            budget = (room // 4) * 3 - 16
+        else:
+            # Unencrypted, the plaintext is embedded as is and only pays for the keys around it.
+            envelope = {'encrypted': False, 'plain_text': '', 'server_id': plexpy.CONFIG.PMS_UUID}
+            budget = self.MAX_DATA_BYTES - len(json.dumps(envelope))
+
+        def encoded_length():
+            return len(json.dumps(plaintext_data).encode('utf-8'))
+
+        def trim(key):
+            text = plaintext_data[key]
+            low, high = 0, len(text)
+
+            while low < high:
+                mid = (low + high + 1) // 2
+                plaintext_data[key] = text[:mid] + '...'
+                if encoded_length() <= budget:
+                    low = mid
+                else:
+                    high = mid - 1
+
+            if low == len(text):
+                return None
+
+            plaintext_data[key] = text[:low] + '...'
+            return f"{key} shortened from {len(text)} to {low} characters"
+
+        if encoded_length() <= budget:
+            return True
+
+        # The body goes first; the subject is the notification's headline, so it is
+        # only shortened when emptying the body was not enough.
+        trimmed = []
+        for key in ('body', 'subject'):
+            note = trim(key)
+            if note:
+                trimmed.append(note)
+            if encoded_length() <= budget:
+                break
+
+        if encoded_length() > budget:
+            logger.error("Tautulli Notifiers :: %s notification is too large to send: %s bytes over the limit "
+                         "with no text left to remove. Shorten the notification text.",
+                         self.NAME, encoded_length() - budget)
+            return False
+
+        logger.warn("Tautulli Notifiers :: %s notification %s to fit the notification size limit."
+                    % (self.NAME, ' and '.join(trimmed)))
+        return True
+
+    def _send_via_relay(self, device, data):
+        url = f"{plexpy.CONFIG.REMOTE_APP_PUSH_URL.rstrip('/')}/v1/notify"
+        device_label = self._device_label(device)
+
+        payload = {'token': device['push_token'],
+                   'platform': device['platform'],
+                   'data': data}
+
+        logger.info("Tautulli Notifiers :: Sending %s notification...", self.NAME)
+        # A 307 or 308 would re-post the push token to wherever Location points. The relay
+        # is verified regardless of VERIFY_SSL_CERT, which is for the user's own server.
+        response, err_msg, _ = request.request_response2(url, 'POST', auto_raise=False, json=payload,
+                                                        timeout=self.TIMEOUT,
+                                                        allow_redirects=False, verify=True)
+
+        if response is None:
+            logger.error("Tautulli Notifiers :: %s notification to device %s failed.", self.NAME, device_label)
+            if err_msg:
+                logger.error("Tautulli Notifiers :: %s", err_msg)
+            return False
+
+        if response.status_code == 200:
+            logger.info("Tautulli Notifiers :: %s notification sent to device %s.", self.NAME, device_label)
+            # Delivery proves the token is live, so a device whose validation was
+            # refused or interrupted heals itself here.
+            mobile_app.set_official_from_delivery(device, 1)
+            return True
+
+        elif response.status_code == 410:
+            # Clearing the flag only drops the device from the notifier config list,
+            # not from an agent already saved against it, so report this once.
+            was_official = device['official'] == 1
+            mobile_app.set_official_from_delivery(device, 0)
+            log_dead_token = logger.error if was_official else logger.debug
+            log_dead_token("Tautulli Notifiers :: %s notification to device %s failed: the push token is "
+                           "no longer valid. Open Tautulli Remote on the device to register it again.", self.NAME, device_label)
+
+        elif response.status_code == 429:
+            # Only the daily fair use cap carries rate limit details, and unlike a
+            # burst refusal it will not clear until it resets.
+            try:
+                rate_limits = response.json().get('rateLimits') or {}
+            except ValueError:
+                rate_limits = {}
+
+            if rate_limits:
+                logger.error("Tautulli Notifiers :: %s notification to device %s failed: the daily "
+                             "notification limit has been reached. Further notifications to this device will "
+                             "fail until the limit resets at %s.", self.NAME, device_label, rate_limits.get('resetsAt', 'the next reset'))
+            else:
+                logger.error("Tautulli Notifiers :: %s notification to device %s failed: notifications "
+                             "are being rate limited, so this one was dropped. Retry-After: %s.", self.NAME, device_label,
+                             response.headers.get('Retry-After', 'unknown'))
+
+        elif response.status_code == 413:
+            logger.error("Tautulli Notifiers :: %s notification to device %s failed: the notification is "
+                         "too large to deliver. Shorten the notification text.", self.NAME, device_label)
+
+        else:
+            logger.error("Tautulli Notifiers :: %s notification to device %s failed: the push relay "
+                         "returned status code %s.", self.NAME, device_label, response.status_code)
+
+        return False
 
     def agent_notify(self, subject='', body='', action='', notification_id=None, **kwargs):
         # Check mobile device is still registered
@@ -4027,6 +4161,21 @@ class TAUTULLIREMOTEAPP(Notifier):
             return
         else:
             device = device[0]
+
+        device_label = self._device_label(device)
+
+        if device['push_token'] == mobile_app._PUSH_DISABLED:
+            logger.debug("Tautulli Notifiers :: %s notifications are disabled for this device %s.",
+                         self.NAME, device_label)
+            return False
+
+        # The relay builds a different message per platform, and an iOS device sent
+        # as android gets one its notification extension never runs, so it is never
+        # decrypted and nothing is shown. Refusing says so; guessing does not.
+        if device['platform'] not in ('android', 'ios'):
+            logger.error("Tautulli Notifiers :: %s notification to device %s failed: unknown platform. "
+                         "Re-register the device in Tautulli Remote.", self.NAME, device_label)
+            return False
 
         pretty_metadata = PrettyMetadata(kwargs.get('parameters'))
 
@@ -4041,6 +4190,11 @@ class TAUTULLIREMOTEAPP(Notifier):
                           'user_id': pretty_metadata.parameters.get('user_id', ''),
                           'rating_key': pretty_metadata.parameters.get('rating_key', ''),
                           'poster_thumb': pretty_metadata.parameters.get('poster_thumb', '')}
+
+        via_relay = self._via_relay(device)
+
+        if via_relay and not self._trim_to_relay_limit(plaintext_data):
+            return False
 
         #logger.debug("Plaintext data: {}".format(plaintext_data))
 
@@ -4065,32 +4219,32 @@ class TAUTULLIREMOTEAPP(Notifier):
             #logger.debug("Nonce (base64): {}".format(base64.b64encode(nonce)))
             #logger.debug("Salt (base64): {}".format(base64.b64encode(salt)))
 
-            payload = {'app_id': mobile_app._ONESIGNAL_APP_ID,
-                       'include_subscription_ids': [device['onesignal_id']],
-                       'contents': {'en': 'Tautulli Notification'},
-                       'data': {'encrypted': True,
-                                'version': 2,
-                                'cipher_text': helpers.base64str(encrypted_data),
-                                'nonce': helpers.base64str(nonce),
-                                'salt': helpers.base64str(salt),
-                                'server_id': plexpy.CONFIG.PMS_UUID}
-                       }
+            data = {'encrypted': True,
+                    'version': 2,
+                    'cipher_text': helpers.base64str(encrypted_data),
+                    'nonce': helpers.base64str(nonce),
+                    'salt': helpers.base64str(salt),
+                    'server_id': plexpy.CONFIG.PMS_UUID}
         else:
             logger.warn("Tautulli Notifiers :: Cryptography library is missing. "
                         "Tautulli Remote app notifications will be sent unencrypted. "
                         "Install the library to encrypt the notifications.")
 
-            payload = {'app_id': mobile_app._ONESIGNAL_APP_ID,
-                       'include_subscription_ids': [device['onesignal_id']],
-                       'contents': {'en': 'Tautulli Notification'},
-                       'data': {'encrypted': False,
-                                'plain_text': plaintext_data,
-                                'server_id': plexpy.CONFIG.PMS_UUID}
-                       }
+            data = {'encrypted': False,
+                    'plain_text': plaintext_data,
+                    'server_id': plexpy.CONFIG.PMS_UUID}
 
-        #logger.debug("OneSignal payload: {}".format(payload))
+        #logger.debug("Notification data: {}".format(data))
+
+        if via_relay:
+            return self._send_via_relay(device, data)
 
         headers = {'Content-Type': 'application/json'}
+        payload = {'app_id': mobile_app._ONESIGNAL_APP_ID,
+                   'include_subscription_ids': [device['onesignal_id']],
+                   'contents': {'en': 'Tautulli Notification'},
+                   'data': data
+                   }
 
         return self.make_request('https://api.onesignal.com/notifications', headers=headers, json=payload)
 
@@ -4099,8 +4253,9 @@ class TAUTULLIREMOTEAPP(Notifier):
 
         try:
             query = "SELECT * FROM mobile_devices WHERE official = 1 " \
-                    "AND onesignal_id IS NOT NULL AND onesignal_id != ''"
-            return db.select(query=query)
+                    "AND ((push_token IS NOT NULL AND push_token != '' AND push_token != ?) " \
+                    "OR (onesignal_id IS NOT NULL AND onesignal_id != ''))"
+            return db.select(query=query, args=[mobile_app._PUSH_DISABLED])
         except Exception as e:
             logger.warn("Tautulli Notifiers :: Unable to retrieve Tautulli Remote app devices list: %s." % e)
             return []
@@ -4128,22 +4283,33 @@ class TAUTULLIREMOTEAPP(Notifier):
                 'input_type': 'help'
             })
 
-        config_option[-1]['description'] += ('<br><br>Notifications are sent using '
-            '<a href="' + helpers.anon_url('https://onesignal.com') + '" target="_blank" rel="noreferrer">'
-            'OneSignal</a>. Some user data is collected and cannot be encrypted.<br>'
-            'Please read the <a href="' + helpers.anon_url(
-                'https://onesignal.com/privacy_policy') + '" target="_blank" rel="noreferrer">'
-            'OneSignal Privacy Policy</a> for more details.')
+        # Appended to either block above, so it must hold with or without encryption.
+        config_option[-1]['description'] += ('<br><br>Notifications are delivered through the Tautulli Remote relay '
+            'and Google Firebase Cloud Messaging. The relay stores no notification content and only forwards '
+            'the notification to your device.')
+
+        # Resolved the way agent_notify resolves it, by device_id and without the
+        # official filter get_devices() applies, so the notice cannot go missing while
+        # this agent is still delivering through OneSignal.
+        selected = mobile_app.get_mobile_devices(device_id=self.config['device_id']) \
+            if self.config['device_id'] else []
+
+        if selected and not self._via_relay(selected[0]):
+            config_option[-1]['description'] += ('<br>This device was registered with an older app version and is '
+                'delivered through <a href="' + helpers.anon_url('https://onesignal.com') + '" target="_blank" '
+                'rel="noreferrer">OneSignal</a> instead. Some user data is collected and cannot be encrypted. '
+                'Please read the <a href="' + helpers.anon_url('https://onesignal.com/privacy_policy') + '" '
+                'target="_blank" rel="noreferrer">OneSignal Privacy Policy</a> for more details.')
 
         devices = self.get_devices()
 
         if not devices:
             config_option.append({
                 'label': 'Device',
-                'description': 'No mobile devices registered with OneSignal. '
+                'description': 'No mobile devices registered for notifications. '
                                '<a data-tab-destination="remote_app" data-toggle="tab" data-dismiss="modal">'
                                'Get the Tautulli Remote App</a> and register a device.<br>'
-                               'Note: Only devices registered with a valid OneSignal ID will appear in the list.',
+                               'Note: Only devices registered for notifications will appear in the list.',
                 'input_type': 'help'
             })
         else:
@@ -4165,7 +4331,7 @@ class TAUTULLIREMOTEAPP(Notifier):
                 'description': 'Select your mobile device or '
                                '<a data-tab-destination="remote_app" data-toggle="tab" data-dismiss="modal">'
                                'register a new device</a> with Tautulli.<br>'
-                               'Note: Only devices registered with a valid OneSignal ID will appear in the list.',
+                               'Note: Only devices registered for notifications will appear in the list.',
                 'input_type': 'select',
                 'select_options': device_select,
                 'refresh': True

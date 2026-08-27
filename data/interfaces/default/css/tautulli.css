@@ -319,7 +319,8 @@ object {
     background-color: #999;
 }
 .padded-header {
-    margin: 25px 0 25px 0;
+    margin: 25px 0 25px -10px;
+    padding-left: 10px;
 }
 .padded-header h1,h2,h3,h4,h5,h6 {
     color: #eee;
@@ -996,6 +997,10 @@ a .users-poster-face:hover {
     flex-grow: 1;
     z-index: 1;
 }
+.dashboard-activity-info-scroller.scroll-wrapper > .scroll-content {
+    width: 100% !important;
+    max-height: 100% !important;
+}
 .dashboard-activity-info-scroller.scrollbar-macosx > .scroll-element.scroll-y {
     left: 10px;
 }
@@ -1438,6 +1443,10 @@ a .dashboard-activity-metadata-user-thumb:hover {
     -webkit-flex-grow: 1;
     flex-grow: 1;
     z-index: 1;
+}
+.dashboard-stats-info-scroller.scroll-wrapper > .scroll-content {
+    width: 100% !important;
+    max-height: 100% !important;
 }
 .dashboard-stats-info-scroller.scrollbar-macosx > .scroll-element.scroll-y {
     left: 10px;
@@ -2485,6 +2494,7 @@ a .library-user-instance-box:hover {
 }
 .home-padded-header {
     margin: 25px 0;
+    padding: 0;
     height: 34px;
 }
 .home-padded-header h3 {
