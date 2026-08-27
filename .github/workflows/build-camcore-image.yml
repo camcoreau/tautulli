@@ -89,6 +89,7 @@ jobs:
           python3 -m py_compile camcore-account-audit/audit.py
           python3 -m unittest discover -s camcore-account-audit/tests -v
           python3 -m json.tool youtrack-app/cma-account-audit/manifest.json > /dev/null
+          python3 -m json.tool youtrack-workflows/camcore-due-date-notifications/manifest.json > /dev/null
           node --check youtrack-app/cma-account-audit/account-sync.js
           node --check youtrack-workflows/cma-account-review/lifecycle-transitions.js
           node --check youtrack-workflows/cma-account-review/notice-escalation.js
@@ -98,10 +99,12 @@ jobs:
           node --check youtrack-workflows/cma-account-review/lifecycle-catchup.js
           node --check youtrack-workflows/cma-account-review/communication-catchup.js
           node --check youtrack-workflows/cma-account-review/reporter-replies.js
+          node --check youtrack-workflows/camcore-due-date-notifications/overdue-notifications.js
           node youtrack-workflows/cma-account-review/tests/test-communications.js
           node youtrack-workflows/cma-account-review/tests/test-reporter-replies.js
           node youtrack-workflows/cma-account-review/tests/test-lifecycle-transitions.js
           node youtrack-workflows/cma-account-review/tests/test-lifecycle-catchup.js
+          node youtrack-workflows/camcore-due-date-notifications/tests/test-overdue-notifications.js
 
   build-and-publish:
     name: Build and publish AMD64 image
@@ -224,4 +227,3 @@ jobs:
           cache-from: type=gha,scope=cma-account-audit-amd64
           cache-to: type=gha,mode=max,scope=cma-account-audit-amd64
           provenance: false
-
