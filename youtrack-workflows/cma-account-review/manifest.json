@@ -1,5 +1,9 @@
 {
+  "$schema": "https://json.schemastore.org/youtrack-app.json",
   "name": "cma-account-review",
   "title": "CMA Account Review Lifecycle",
-  "version": "1.2.0"
+  "description": "Automated and idempotent Cameron-Media account review lifecycle communications.",
+  "version": "2.0.0",
+  "minYouTrackVersion": "2024.3.0",
+  "changeNotes": "Add retry-only recovery, historical quarantine, audit-gated transitions, persistent per-stage delivery tokens, and exact promised intervals."
 }

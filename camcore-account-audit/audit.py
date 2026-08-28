@@ -18,6 +18,8 @@ from typing import Any, Iterable
 
 UTC = timezone.utc
 DEFAULT_USER_AGENT = "CamCore-CMA-Account-Audit/1.0"
+JS_MAX_SAFE_INTEGER = (2**53) - 1
+MAX_FUTURE_CLOCK_SKEW = timedelta(minutes=5)
 
 
 class ConfigurationError(RuntimeError):
@@ -222,8 +224,14 @@ class TautulliClient:
             raise RemoteApiError("Tautulli get_users_table returned an invalid data list")
 
         accounts = []
+        observed_at = utc_now()
         for row in rows:
-            account = account_from_row(row)
+            try:
+                account = account_from_row(row, observed_at=observed_at)
+            except ValueError as exc:
+                raise RemoteApiError(
+                    f"Tautulli get_users_table contained unsafe account telemetry: {exc}"
+                ) from exc
             if account is not None:
                 accounts.append(account)
         return accounts
@@ -304,14 +312,58 @@ class Registry:
         os.replace(temp_path, self.path)
 
 
-def safe_int(value: Any) -> int:
+def required_non_negative_int(name: str, value: Any) -> int:
+    if isinstance(value, bool) or value is None or str(value).strip() == "":
+        raise ValueError(f"{name} is missing or invalid")
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError(f"{name} is missing or invalid")
     try:
-        return max(0, int(value or 0))
-    except (TypeError, ValueError):
-        return 0
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} is missing or invalid") from exc
+    if parsed < 0 or parsed > JS_MAX_SAFE_INTEGER:
+        raise ValueError(f"{name} is missing or invalid")
+    return parsed
 
 
-def account_from_row(row: Any) -> Account | None:
+def optional_non_negative_int(name: str, value: Any, default: int = 0) -> int:
+    if value is None or str(value).strip() == "":
+        return default
+    return required_non_negative_int(name, value)
+
+
+def last_streamed_from_row(
+    value: Any,
+    *,
+    total_plays: int,
+    observed_at: datetime,
+) -> datetime | None:
+    if value is None or str(value).strip() == "":
+        last_seen_epoch = None
+    else:
+        last_seen_epoch = required_non_negative_int("last_seen", value)
+
+    if total_plays == 0:
+        if last_seen_epoch not in (None, 0):
+            raise ValueError("last_seen conflicts with zero plays")
+        return None
+
+    if last_seen_epoch in (None, 0):
+        raise ValueError("last_seen is required when plays are greater than zero")
+    try:
+        last_streamed = datetime.fromtimestamp(last_seen_epoch, UTC)
+    except (OverflowError, OSError, ValueError) as exc:
+        raise ValueError("last_seen is missing or invalid") from exc
+    if last_streamed > observed_at + MAX_FUTURE_CLOCK_SKEW:
+        raise ValueError("last_seen is too far in the future")
+    return last_streamed
+
+
+def account_from_row(
+    row: Any,
+    *,
+    observed_at: datetime | None = None,
+) -> Account | None:
     if not isinstance(row, dict):
         return None
     user_id = str(row.get("user_id") or "").strip()
@@ -319,9 +371,12 @@ def account_from_row(row: Any) -> Account | None:
     if not user_id or not username:
         return None
 
-    last_seen_epoch = safe_int(row.get("last_seen"))
-    last_streamed = (
-        datetime.fromtimestamp(last_seen_epoch, UTC) if last_seen_epoch > 0 else None
+    observed_at = observed_at or utc_now()
+    total_plays = required_non_negative_int("plays", row.get("plays"))
+    last_streamed = last_streamed_from_row(
+        row.get("last_seen"),
+        total_plays=total_plays,
+        observed_at=observed_at,
     )
     email = str(row.get("email") or "").strip() or None
     return Account(
@@ -329,8 +384,8 @@ def account_from_row(row: Any) -> Account | None:
         username=username,
         email=email,
         last_streamed=last_streamed,
-        total_plays=safe_int(row.get("plays")),
-        watch_seconds=safe_int(row.get("duration")),
+        total_plays=total_plays,
+        watch_seconds=optional_non_negative_int("duration", row.get("duration")),
     )
 
 
@@ -343,6 +398,8 @@ def classify_account(
     never_used_days: int,
 ) -> Decision:
     if account.total_plays == 0:
+        if account.last_streamed is not None:
+            raise ValueError("zero-play accounts cannot have a last-streamed timestamp")
         age = observed_at - first_seen
         eligible = age >= timedelta(days=never_used_days)
         return Decision(
@@ -356,11 +413,9 @@ def classify_account(
         )
 
     if account.last_streamed is None:
-        return Decision(
-            account_status="Inactive",
-            review_needed=False,
-            reason="plays exist but Tautulli supplied no last-streamed timestamp",
-        )
+        raise ValueError("accounts with plays require a last-streamed timestamp")
+    if account.last_streamed > observed_at + MAX_FUTURE_CLOCK_SKEW:
+        raise ValueError("last-streamed timestamp is too far in the future")
 
     inactive_for = observed_at - account.last_streamed
     if inactive_for >= timedelta(days=inactive_days):

@@ -11,10 +11,18 @@ Plex access. The final destructive action remains an administrator task in the
 - A zero-play account becomes reviewable after it has been observed for 14 days.
 - `Guest` and `Local` are always excluded, case-insensitively.
 - The stable Plex user ID is the idempotency key. Repeated runs update the same
-  ticket instead of creating duplicates.
+  ticket instead of creating duplicates. If the ID and username resolve to
+  different tickets, synchronization stops without changing either ticket.
 - Accounts that stream again while a review is pending move to `Access Retained`.
+- A retained ticket cannot restart from the same inactive evidence. It must first
+  receive an `Active` audit result, then later become reviewable again.
 - New inactive and never-used reviews begin at `Inactivity Notice`. The CMA
   YouTrack workflow owns the later seven-day notice and grace-period transitions.
+- Missing or malformed Tautulli play counts, inconsistent play timestamps, and
+  malformed watch-duration values abort the whole audit batch before any YouTrack
+  synchronization. Plays greater than zero require a positive last-streamed
+  timestamp; zero plays require no timestamp. Timestamps more than five minutes
+  in the future are rejected.
 
 The 14-day timer is based on the first time this worker observes a zero-play
 account because Tautulli does not expose a reliable share-created timestamp in

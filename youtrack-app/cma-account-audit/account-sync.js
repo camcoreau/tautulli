@@ -2,6 +2,8 @@ const entities = require('@jetbrains/youtrack-scripting-api/entities');
 const search = require('@jetbrains/youtrack-scripting-api/search');
 
 const PROJECT_ID = 'CMA';
+const MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
+const ACCOUNT_STATUSES = ['Active', 'Inactive', 'Never Used'];
 const REVIEW_STAGES_IN_PROGRESS = [
   'Inactivity Notice',
   'Subject to Deletion',
@@ -27,10 +29,78 @@ function optionalInteger(body, key) {
   if (value === null || value === undefined) {
     return null;
   }
-  if (!Number.isInteger(value) || value < 0) {
-    throw new Error(key + ' must be a non-negative integer or null');
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(key + ' must be a non-negative safe integer or null');
   }
   return value;
+}
+
+function formatWatchTime(seconds) {
+  const totalMinutes = Math.floor(seconds / 60);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours ? hours + ' hrs ' + minutes + ' mins' : minutes + ' mins';
+}
+
+function validatePayload(payload, now) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('request body must be a JSON object');
+  }
+
+  const body = {
+    plexUserId: requiredString(payload, 'plexUserId'),
+    plexUsername: requiredString(payload, 'plexUsername'),
+    email: requiredString(payload, 'email'),
+    totalPlays: optionalInteger(payload, 'totalPlays'),
+    watchSeconds: optionalInteger(payload, 'watchSeconds'),
+    lastStreamedMs: optionalInteger(payload, 'lastStreamedMs'),
+    watchTime: requiredString(payload, 'watchTime'),
+    accountStatus: requiredString(payload, 'accountStatus'),
+    reviewNeeded: payload.reviewNeeded
+  };
+
+  if (typeof body.reviewNeeded !== 'boolean') {
+    throw new Error('reviewNeeded must be a boolean');
+  }
+  if (body.totalPlays === null || body.watchSeconds === null) {
+    throw new Error('totalPlays and watchSeconds must be non-negative safe integers');
+  }
+  if (body.watchTime !== formatWatchTime(body.watchSeconds)) {
+    throw new Error('watchTime does not match watchSeconds');
+  }
+  if (ACCOUNT_STATUSES.indexOf(body.accountStatus) === -1) {
+    throw new Error('accountStatus must be Active, Inactive, or Never Used');
+  }
+  if (body.lastStreamedMs !== null && body.lastStreamedMs <= 0) {
+    throw new Error('lastStreamedMs must be a positive timestamp or null');
+  }
+  if (body.lastStreamedMs !== null &&
+      body.lastStreamedMs > now + MAX_FUTURE_SKEW_MS) {
+    throw new Error('lastStreamedMs is too far in the future');
+  }
+
+  const hasNeverUsedFacts = body.totalPlays === 0 && body.lastStreamedMs === null;
+  if ((body.accountStatus === 'Never Used') !== hasNeverUsedFacts) {
+    throw new Error(
+      'Never Used requires exactly zero plays and no last-streamed timestamp'
+    );
+  }
+  if (body.totalPlays === 0 && body.lastStreamedMs !== null) {
+    throw new Error('zero-play accounts cannot have a last-streamed timestamp');
+  }
+  if (body.totalPlays > 0 && body.lastStreamedMs === null) {
+    throw new Error('accounts with plays require a last-streamed timestamp');
+  }
+  if (body.accountStatus === 'Active' &&
+      (body.totalPlays <= 0 || body.lastStreamedMs === null || body.reviewNeeded)) {
+    throw new Error(
+      'Active requires plays, a last-streamed timestamp, and reviewNeeded=false'
+    );
+  }
+  if (body.accountStatus === 'Inactive' && !body.reviewNeeded) {
+    throw new Error('Inactive requires reviewNeeded=true');
+  }
+  return body;
 }
 
 function queryValue(value) {
@@ -66,21 +136,65 @@ function uniqueMatch(ctx, fieldName, value) {
   return matches.length === 1 ? matches[0] : null;
 }
 
+function resolveIssue(ctx, body) {
+  const idMatch = uniqueMatch(ctx, 'Plex User ID', body.plexUserId);
+  const usernameMatch = uniqueMatch(ctx, 'Plex Username', body.plexUsername);
+  if (idMatch && usernameMatch && idMatch.id !== usernameMatch.id) {
+    throw new Error(
+      'Plex User ID and Plex Username resolve to different CMA tickets; ' +
+      'resolve the identity conflict before syncing'
+    );
+  }
+  if (!idMatch && usernameMatch) {
+    const storedId = usernameMatch.fields['Plex User ID'];
+    if (storedId && String(storedId) !== body.plexUserId) {
+      throw new Error(
+        'Plex Username is already linked to a different Plex User ID; ' +
+        'resolve the identity conflict before syncing'
+      );
+    }
+  }
+  return idMatch || usernameMatch;
+}
+
 function stageName(issue) {
   const value = issue.fields['Review Stage'];
   return value ? value.name : null;
 }
 
-function projectValue(issue, fieldName, valueName) {
-  const field = issue.project.findFieldByName(fieldName);
+function accountStatusName(issue) {
+  const value = issue.fields['Account Status'];
+  return value ? value.name : null;
+}
+
+function projectField(project, fieldName) {
+  const field = project.findFieldByName(fieldName);
   if (!field) {
-    throw new Error(fieldName + ' is not attached to project ' + issue.project.shortName);
+    throw new Error(fieldName + ' is not attached to project ' + project.shortName);
   }
+  return field;
+}
+
+function projectValue(project, fieldName, valueName) {
+  const field = projectField(project, fieldName);
   const value = field.findValueByName(valueName);
   if (!value) {
     throw new Error(fieldName + ' does not contain value ' + valueName);
   }
   return value;
+}
+
+function sameUser(left, right) {
+  if (!left || !right) {
+    return false;
+  }
+  if (left.id && right.id) {
+    return left.id === right.id;
+  }
+  if (left.login && right.login) {
+    return left.login === right.login;
+  }
+  return left === right;
 }
 
 function buildDescription(body) {
@@ -105,38 +219,75 @@ function buildDescription(body) {
   ].join('\n');
 }
 
-function applyFacts(issue, body) {
+function planReviewDecision(issue, body, previousAccountStatus) {
+  const currentStage = issue ? stageName(issue) : null;
+
+  if (body.accountStatus === 'Active' &&
+      REVIEW_STAGES_IN_PROGRESS.indexOf(currentStage) !== -1) {
+    return {action: 'retained', targetStage: 'Access Retained'};
+  }
+
+  if (!body.reviewNeeded) {
+    return {action: 'facts-only', targetStage: null};
+  }
+
+  if (currentStage === 'Exempt' || currentStage === 'Access Removed') {
+    return {action: 'protected-terminal-stage', targetStage: null};
+  }
+
+  if (currentStage === 'Access Retained') {
+    if (previousAccountStatus === 'Active') {
+      return {
+        action: 'notice-restarted-after-active-baseline',
+        targetStage: 'Inactivity Notice'
+      };
+    }
+    return {action: 'retained-awaiting-new-active-baseline', targetStage: null};
+  }
+
+  if (REVIEW_STAGES_IN_PROGRESS.indexOf(currentStage) !== -1) {
+    return {action: 'review-already-in-progress', targetStage: null};
+  }
+
+  return {action: 'notice-started', targetStage: 'Inactivity Notice'};
+}
+
+function preflightMutation(project, body, plan) {
+  [
+    'Plex User ID',
+    'Plex Username',
+    'Last Streamed',
+    'Total Plays',
+    'Watch Time',
+    'Account Audit Confirmed At',
+    'Review Stage'
+  ].forEach(function(fieldName) {
+    projectField(project, fieldName);
+  });
+
+  const values = {
+    accountStatus: projectValue(project, 'Account Status', body.accountStatus),
+    reviewStage: null
+  };
+  if (plan.targetStage) {
+    values.reviewStage = projectValue(project, 'Review Stage', plan.targetStage);
+  }
+  return values;
+}
+
+function applyFacts(issue, body, values) {
   issue.fields['Plex User ID'] = body.plexUserId;
   issue.fields['Plex Username'] = body.plexUsername;
   issue.fields['Last Streamed'] = body.lastStreamedMs;
   issue.fields['Total Plays'] = body.totalPlays;
   issue.fields['Watch Time'] = body.watchTime;
-  issue.fields['Account Status'] = projectValue(issue, 'Account Status', body.accountStatus);
+  issue.fields['Account Status'] = values.accountStatus;
 }
 
-function applyReviewDecision(issue, body, ctx) {
-  const currentStage = stageName(issue);
-
-  if (body.accountStatus === 'Active' &&
-      REVIEW_STAGES_IN_PROGRESS.indexOf(currentStage) !== -1) {
-    issue.fields['Review Stage'] = projectValue(issue, 'Review Stage', 'Access Retained');
-    return 'retained';
+function applyReviewDecision(issue, plan, values) {
+  if (plan.targetStage) {
+    issue.fields['Review Stage'] = values.reviewStage;
   }
-
-  if (!body.reviewNeeded) {
-    return 'facts-only';
-  }
-
-  if (currentStage === 'Exempt' || currentStage === 'Access Removed') {
-    return 'protected-terminal-stage';
-  }
-
-  if (REVIEW_STAGES_IN_PROGRESS.indexOf(currentStage) !== -1) {
-    return 'review-already-in-progress';
-  }
-
-  issue.fields['Review Stage'] = projectValue(issue, 'Review Stage', 'Inactivity Notice');
-  return 'notice-started';
 }
 
 exports.httpHandler = {
@@ -154,17 +305,7 @@ exports.httpHandler = {
 
         let body;
         try {
-          body = ctx.request.json();
-          body.plexUserId = requiredString(body, 'plexUserId');
-          body.plexUsername = requiredString(body, 'plexUsername');
-          body.totalPlays = optionalInteger(body, 'totalPlays');
-          body.watchSeconds = optionalInteger(body, 'watchSeconds');
-          body.lastStreamedMs = optionalInteger(body, 'lastStreamedMs');
-          body.watchTime = requiredString(body, 'watchTime');
-          body.accountStatus = requiredString(body, 'accountStatus');
-          if (typeof body.reviewNeeded !== 'boolean') {
-            throw new Error('reviewNeeded must be a boolean');
-          }
+          body = validatePayload(ctx.request.json(), Date.now());
         } catch (error) {
           replyError(ctx, 400, error.message);
           return;
@@ -172,54 +313,68 @@ exports.httpHandler = {
 
         let issue;
         try {
-          issue = uniqueMatch(ctx, 'Plex User ID', body.plexUserId);
-          if (!issue) {
-            issue = uniqueMatch(ctx, 'Plex Username', body.plexUsername);
-          }
+          issue = resolveIssue(ctx, body);
         } catch (error) {
           replyError(ctx, 409, error.message);
           return;
         }
 
-        let created = false;
         if (!issue && !body.reviewNeeded) {
           ctx.response.json({result: 'healthy-no-ticket', plexUserId: body.plexUserId});
           return;
         }
 
-        if (!issue) {
-          const email = typeof body.email === 'string' ? body.email.trim() : '';
-          const reporter = email ? entities.User.findUniqueByEmail(email) : null;
-          if (!reporter) {
-            replyError(
-              ctx,
-              422,
-              'No unique YouTrack Helpdesk reporter matches the Plex email address'
-            );
-            return;
-          }
+        const reporter = entities.User.findUniqueByEmail(body.email);
+        if (!reporter) {
+          replyError(
+            ctx,
+            422,
+            'No unique YouTrack Helpdesk reporter matches the Plex email address'
+          );
+          return;
+        }
+        if (issue && !sameUser(issue.reporter, reporter)) {
+          replyError(
+            ctx,
+            409,
+            'The existing CMA ticket reporter does not match the incoming Plex email'
+          );
+          return;
+        }
+
+        const previousAccountStatus = issue ? accountStatusName(issue) : null;
+        const plan = planReviewDecision(issue, body, previousAccountStatus);
+        let values;
+        try {
+          values = preflightMutation(ctx.project, body, plan);
+        } catch (error) {
+          replyError(ctx, 422, error.message);
+          return;
+        }
+
+        const created = !issue;
+        if (created) {
           issue = new entities.Issue(
             reporter,
             ctx.project,
             'Account Review — ' + body.plexUsername
           );
           issue.description = buildDescription(body);
-          created = true;
         }
 
-        try {
-          applyFacts(issue, body);
-          const action = applyReviewDecision(issue, body, ctx);
-          ctx.response.json({
-            result: created ? 'created' : 'updated',
-            action: action,
-            issueId: issue.id,
-            reviewStage: stageName(issue),
-            plexUserId: body.plexUserId
-          });
-        } catch (error) {
-          replyError(ctx, 400, error.message);
-        }
+        // Keep every write in the request transaction. Mutation exceptions must
+        // escape so YouTrack rolls the whole update back instead of acknowledging
+        // a partial audit.
+        applyFacts(issue, body, values);
+        applyReviewDecision(issue, plan, values);
+        issue.fields['Account Audit Confirmed At'] = Date.now();
+        ctx.response.json({
+          result: created ? 'created' : 'updated',
+          action: plan.action,
+          issueId: issue.id,
+          reviewStage: stageName(issue),
+          plexUserId: body.plexUserId
+        });
       }
     }
   ],
@@ -235,6 +390,10 @@ exports.httpHandler = {
     LastStreamed: {
       type: entities.Field.dateType,
       name: 'Last Streamed'
+    },
+    AccountAuditConfirmedAt: {
+      type: entities.Field.dateTimeType,
+      name: 'Account Audit Confirmed At'
     },
     TotalPlays: {
       type: entities.Field.integerType,

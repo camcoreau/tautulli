@@ -3,10 +3,11 @@ const communications = require('./communications');
 
 exports.rule = entities.Issue.onChange({
   title: 'Send CMA lifecycle messages when the review stage changes',
-  guard: (ctx) => ctx.issue.fields.isChanged(ctx.ReviewStage) &&
-    communications.needsMessage(ctx.issue),
+  guard: (ctx) => ctx.issue.fields.isChanged(ctx.ReviewStage),
   action: (ctx) => {
-    communications.sendCurrentMessage(ctx.issue);
+    // Every stage transition receives a fresh delivery token. This remains
+    // correct even when a later review returns to the same message stage.
+    communications.sendForStageChange(ctx.issue);
   },
   requirements: {
     ReviewStage: {

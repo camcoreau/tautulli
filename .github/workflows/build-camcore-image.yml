@@ -84,13 +84,20 @@ jobs:
         if: github.ref != 'refs/heads/master'
         run: docker build --pull --file Dockerfile.camcore --tag camcore-tautulli:validation .
 
+      - name: Build CMA account audit image without publishing
+        if: github.ref != 'refs/heads/master'
+        run: docker build --pull --file camcore-account-audit/Dockerfile --tag cma-account-audit:validation camcore-account-audit
+
       - name: Validate Cameron-Media account audit
         run: |
           python3 -m py_compile camcore-account-audit/audit.py
           python3 -m unittest discover -s camcore-account-audit/tests -v
           python3 -m json.tool youtrack-app/cma-account-audit/manifest.json > /dev/null
+          python3 -m json.tool youtrack-workflows/cma-account-review/manifest.json > /dev/null
+          python3 -m json.tool youtrack-workflows/cma-account-review/entity-extensions.json > /dev/null
           python3 -m json.tool youtrack-workflows/camcore-due-date-notifications/manifest.json > /dev/null
           node --check youtrack-app/cma-account-audit/account-sync.js
+          node youtrack-app/cma-account-audit/tests/test-account-sync.js
           node --check youtrack-workflows/cma-account-review/lifecycle-transitions.js
           node --check youtrack-workflows/cma-account-review/notice-escalation.js
           node --check youtrack-workflows/cma-account-review/deadline-transitions.js
@@ -98,13 +105,42 @@ jobs:
           node --check youtrack-workflows/cma-account-review/stage-communications.js
           node --check youtrack-workflows/cma-account-review/lifecycle-catchup.js
           node --check youtrack-workflows/cma-account-review/communication-catchup.js
+          node --check youtrack-workflows/cma-account-review/audit-freshness-bridge.js
           node --check youtrack-workflows/cma-account-review/reporter-replies.js
           node --check youtrack-workflows/camcore-due-date-notifications/overdue-notifications.js
           node youtrack-workflows/cma-account-review/tests/test-communications.js
           node youtrack-workflows/cma-account-review/tests/test-reporter-replies.js
           node youtrack-workflows/cma-account-review/tests/test-lifecycle-transitions.js
           node youtrack-workflows/cma-account-review/tests/test-lifecycle-catchup.js
+          node youtrack-workflows/cma-account-review/tests/test-communication-rules.js
+          node youtrack-workflows/cma-account-review/tests/test-audit-freshness-bridge.js
+          node youtrack-workflows/cma-account-review/tests/test-deadline-safety.js
+          node youtrack-workflows/cma-account-review/tests/test-incident-regression.js
           node youtrack-workflows/camcore-due-date-notifications/tests/test-overdue-notifications.js
+
+      - name: Build exact CMA YouTrack upload packages
+        run: |
+          python3 .github/scripts/package_cma_workflow.py
+          python3 .github/scripts/package_cma_account_audit.py
+          python3 -m zipfile --list dist/cma-account-review.zip
+          python3 -m zipfile --list dist/cma-account-audit.zip
+          sha256sum dist/cma-account-review.zip dist/cma-account-audit.zip
+
+      - name: Publish reviewed CMA workflow package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cma-account-review-workflow
+          path: dist/cma-account-review.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish reviewed CMA account-audit app
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cma-account-audit-app
+          path: dist/cma-account-audit.zip
+          if-no-files-found: error
+          retention-days: 30
 
   build-and-publish:
     name: Build and publish AMD64 image

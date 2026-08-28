@@ -25,7 +25,6 @@ function needsRepair(ctx) {
 
   if (stage === ctx.ReviewStage.InactivityNotice.name) {
     return !issue.fields.InactivityNoticeSent ||
-      communications.needsMessage(issue) ||
       !isValue(issue, ctx.Outcome, ctx.Outcome.Pending) ||
       !isValue(issue, ctx.State, ctx.State.Pending) ||
       !issue.fields.RemovalReason;
@@ -33,7 +32,6 @@ function needsRepair(ctx) {
 
   if (stage === ctx.ReviewStage.SubjectToDeletion.name) {
     return !issue.fields.GracePeriodEnds ||
-      communications.needsMessage(issue) ||
       !isValue(issue, ctx.Outcome, ctx.Outcome.Pending) ||
       !isValue(issue, ctx.State, ctx.State.Pending);
   }
@@ -68,13 +66,18 @@ function repair(ctx) {
   const stage = valueName(issue.fields.ReviewStage);
 
   if (!stage) {
+    // Normalizing a legacy ticket is an internal repair, not a new member
+    // decision. Record the stage without creating a public Helpdesk message.
+    communications.suppressStageMessage(
+      issue,
+      ctx.ReviewStage.AccessRetained.name
+    );
     issue.fields.ReviewStage = ctx.ReviewStage.AccessRetained;
     return;
   }
 
   if (stage === ctx.ReviewStage.InactivityNotice.name) {
-    if (!issue.fields.InactivityNoticeSent || communications.needsMessage(issue)) {
-      // Start the timer when the first public notice can actually be sent.
+    if (!issue.fields.InactivityNoticeSent) {
       issue.fields.InactivityNoticeSent = Date.now();
     }
     issue.fields.Outcome = ctx.Outcome.Pending;
@@ -88,8 +91,7 @@ function repair(ctx) {
   }
 
   if (stage === ctx.ReviewStage.SubjectToDeletion.name) {
-    if (!issue.fields.GracePeriodEnds || communications.needsMessage(issue)) {
-      // A delayed catch-up notice still receives the full promised seven days.
+    if (!issue.fields.GracePeriodEnds) {
       issue.fields.GracePeriodEnds = sevenDaysFromNow();
     }
     issue.fields.Outcome = ctx.Outcome.Pending;
@@ -127,7 +129,7 @@ exports.rule = entities.Issue.onSchedule({
   title: 'Repair incomplete CMA lifecycle state before communications',
   search: 'project: CMA',
   cron: '0 2 * * * ?',
-  muteUpdateNotifications: false,
+  muteUpdateNotifications: true,
   modifyUpdatedProperties: false,
   guard: needsRepair,
   action: repair,
