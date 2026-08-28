@@ -131,13 +131,13 @@ const TEMPLATES = {
   ].join('\n')
 };
 
-const SIGNATURES = {
-  inactivity: "account hasn't been used recently",
-  neverUsed: 'access has not yet been used',
-  subjectToDeletion: 'now **subject to deletion**',
-  finalReminder: 'This is a **final reminder**',
-  accessRemoved: 'access to **Cameron-Media** has now been removed',
-  accessRetained: 'removed from the current inactivity review'
+const MESSAGE_STATE_VERSION = 1;
+const AUDIT_FRESHNESS_MS = 24 * 60 * 60 * 1000;
+const AUDIT_GATED_KEYS = {
+  inactivity: true,
+  neverUsed: true,
+  subjectToDeletion: true,
+  finalReminder: true
 };
 
 function valueName(value) {
@@ -166,32 +166,124 @@ function messageKey(issue) {
   return null;
 }
 
-function cycleStartedAt(issue) {
-  return issue.fields['Inactivity Notice Sent'] || 0;
+function stageName(issue) {
+  return valueName(issue.fields['Review Stage']) || '';
 }
 
-function hasMessageSince(issue, signature, since) {
-  let found = false;
-  issue.comments.forEach(function(comment) {
-    if (!found && !comment.deleted && comment.created >= since &&
-        typeof comment.text === 'string' && comment.text.indexOf(signature) !== -1) {
-      found = true;
-    }
-  });
-  return found;
+function state(issue) {
+  if (!issue.extensionProperties) {
+    throw new Error('CMA message delivery state is unavailable for ' + issue.id);
+  }
+  return issue.extensionProperties;
 }
 
-function needsMessage(issue) {
+function isStateInitialized(deliveryState) {
+  return Number(deliveryState.cmaMessageStateVersion) >= MESSAGE_STATE_VERSION;
+}
+
+function startDelivery(issue) {
   const key = messageKey(issue);
-  return Boolean(key) &&
-    !hasMessageSince(issue, SIGNATURES[key], cycleStartedAt(issue));
+  const currentStage = stageName(issue);
+  const deliveryState = state(issue);
+
+  deliveryState.cmaMessageStateVersion = MESSAGE_STATE_VERSION;
+  deliveryState.cmaObservedReviewStage = currentStage;
+
+  if (!key) {
+    deliveryState.cmaPendingMessageKey = '';
+    deliveryState.cmaPendingMessageToken = '';
+    deliveryState.cmaDeliveredMessageAt = 0;
+    return null;
+  }
+
+  const sequence = (Number(deliveryState.cmaMessageSequence) || 0) + 1;
+  const token = 'v1:' + sequence + ':' + key;
+  deliveryState.cmaMessageSequence = sequence;
+  deliveryState.cmaPendingMessageKey = key;
+  deliveryState.cmaPendingMessageToken = token;
+  // A previous cycle's timestamp must never authorize the new cycle.
+  deliveryState.cmaDeliveredMessageAt = 0;
+  return token;
 }
 
-function sendCurrentMessage(issue) {
-  const key = messageKey(issue);
-  if (!key || !needsMessage(issue)) {
+function currentDeliveryToken(issue) {
+  const deliveryState = state(issue);
+  if (!isStateInitialized(deliveryState) ||
+      deliveryState.cmaObservedReviewStage !== stageName(issue)) {
+    return null;
+  }
+  return deliveryState.cmaPendingMessageToken || null;
+}
+
+function currentDeliveryKey(issue) {
+  const deliveryState = state(issue);
+  if (!isStateInitialized(deliveryState) ||
+      deliveryState.cmaObservedReviewStage !== stageName(issue)) {
+    return null;
+  }
+  return deliveryState.cmaPendingMessageKey || null;
+}
+
+function hasFreshAudit(issue, afterTimestamp) {
+  const confirmedAt = Number(state(issue).cmaAccountAuditConfirmedAt) || 0;
+  const now = Date.now();
+  const lowerBound = Number(afterTimestamp) || 0;
+  return confirmedAt > lowerBound &&
+    confirmedAt <= now &&
+    now - confirmedAt < AUDIT_FRESHNESS_MS;
+}
+
+function deliveryRequiresFreshAudit(key) {
+  return Boolean(AUDIT_GATED_KEYS[key]);
+}
+
+function needsCatchUp(issue) {
+  const deliveryState = state(issue);
+  if (!isStateInitialized(deliveryState) ||
+      deliveryState.cmaObservedReviewStage !== stageName(issue)) {
+    // Recovery is retry-only. It must never invent a delivery for a historical
+    // issue or for a stage transition the event rule did not prepare.
     return false;
   }
+
+  const token = currentDeliveryToken(issue);
+  const key = currentDeliveryKey(issue);
+  return Boolean(token) && Boolean(key) &&
+    deliveryState.cmaDeliveredMessageToken !== token &&
+    Boolean(issue.reporter) &&
+    !deliveryRequiresFreshAudit(key);
+}
+
+function prepareCatchUpDelivery(issue) {
+  const deliveryState = state(issue);
+  if (!isStateInitialized(deliveryState) ||
+      deliveryState.cmaObservedReviewStage !== stageName(issue)) {
+    return null;
+  }
+
+  const token = currentDeliveryToken(issue);
+  const key = currentDeliveryKey(issue);
+  if (!key || !token || deliveryState.cmaDeliveredMessageToken === token) {
+    return null;
+  }
+  return {key: key, token: token};
+}
+
+function sendPreparedMessage(issue, key, token) {
+  if (!key || !token) {
+    return false;
+  }
+
+  const deliveryState = state(issue);
+  if (currentDeliveryKey(issue) !== key || currentDeliveryToken(issue) !== token ||
+      deliveryState.cmaDeliveredMessageToken === token) {
+    return false;
+  }
+
+  if (deliveryRequiresFreshAudit(key) && !hasFreshAudit(issue, 0)) {
+    return false;
+  }
+
   if (!issue.reporter) {
     console.warn('CMA automated message skipped because the issue has no reporter: ' + issue.id);
     return false;
@@ -200,12 +292,66 @@ function sendCurrentMessage(issue) {
   const comment = issue.addComment(TEMPLATES[key]);
   comment.permittedUsers.clear();
   comment.permittedGroups.clear();
+  deliveryState.cmaDeliveredMessageToken = token;
+  deliveryState.cmaDeliveredMessageAt = comment.created || Date.now();
   return true;
 }
 
+function sendCurrentMessage(issue, fromAuditPulse) {
+  const delivery = prepareCatchUpDelivery(issue);
+  if (!delivery || !issue.reporter ||
+      (deliveryRequiresFreshAudit(delivery.key) && !fromAuditPulse)) {
+    return false;
+  }
+  return sendPreparedMessage(issue, delivery.key, delivery.token);
+}
+
+function suppressStageMessage(issue, targetStage) {
+  state(issue).cmaSuppressedReviewStage = targetStage;
+}
+
+function sendForStageChange(issue) {
+  const deliveryState = state(issue);
+  const suppressedStage = deliveryState.cmaSuppressedReviewStage || '';
+  deliveryState.cmaSuppressedReviewStage = '';
+  const key = messageKey(issue);
+  const token = startDelivery(issue);
+  if (suppressedStage === stageName(issue)) {
+    if (token) {
+      deliveryState.cmaDeliveredMessageToken = token;
+      deliveryState.cmaDeliveredMessageAt = 0;
+    }
+    return false;
+  }
+  return key ? sendPreparedMessage(issue, key, token) : false;
+}
+
+function currentMessageDeliveredAt(issue) {
+  const deliveryState = state(issue);
+  if (!isStateInitialized(deliveryState)) {
+    return 0;
+  }
+
+  const token = currentDeliveryToken(issue);
+  if (token && deliveryState.cmaDeliveredMessageToken === token) {
+    return Number(deliveryState.cmaDeliveredMessageAt) || 0;
+  }
+  // Never let an older cycle or an ambiguous historical comment satisfy the
+  // current stage.
+  return 0;
+}
+
 exports.TEMPLATES = TEMPLATES;
-exports.SIGNATURES = SIGNATURES;
+exports.MESSAGE_STATE_VERSION = MESSAGE_STATE_VERSION;
+exports.AUDIT_FRESHNESS_MS = AUDIT_FRESHNESS_MS;
 exports.messageKey = messageKey;
-exports.hasMessageSince = hasMessageSince;
-exports.needsMessage = needsMessage;
+exports.stageName = stageName;
+exports.startDelivery = startDelivery;
+exports.currentDeliveryToken = currentDeliveryToken;
+exports.currentDeliveryKey = currentDeliveryKey;
+exports.hasFreshAudit = hasFreshAudit;
+exports.needsCatchUp = needsCatchUp;
 exports.sendCurrentMessage = sendCurrentMessage;
+exports.suppressStageMessage = suppressStageMessage;
+exports.sendForStageChange = sendForStageChange;
+exports.currentMessageDeliveredAt = currentMessageDeliveredAt;

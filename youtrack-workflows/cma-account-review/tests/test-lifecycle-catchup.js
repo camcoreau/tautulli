@@ -23,8 +23,6 @@ Module._load = function(request, parent, isMain) {
   return originalLoad(request, parent, isMain);
 };
 
-const communications = require('../communications');
-const originalNeedsMessage = communications.needsMessage;
 const rule = require('../lifecycle-catchup').rule;
 Module._load = originalLoad;
 
@@ -77,22 +75,13 @@ function context(options) {
   };
 
   return {
-    issue: {fields: values},
+    issue: {id: 'CMA-LEGACY', fields: values, extensionProperties: {}},
     ReviewStage: ReviewStage,
     AccountStatus: AccountStatus,
     Outcome: Outcome,
     RemovalReason: RemovalReason,
     State: State
   };
-}
-
-function withMessageNeeded(value, callback) {
-  communications.needsMessage = function() { return value; };
-  try {
-    callback();
-  } finally {
-    communications.needsMessage = originalNeedsMessage;
-  }
 }
 
 function testLegacyActivePendingReviewIsRetained() {
@@ -102,39 +91,40 @@ function testLegacyActivePendingReviewIsRetained() {
   rule.action(ctx);
 
   assert.strictEqual(ctx.issue.fields.ReviewStage, ctx.ReviewStage.AccessRetained);
+  assert.strictEqual(
+    ctx.issue.extensionProperties.cmaSuppressedReviewStage,
+    'Access Retained'
+  );
+  assert.strictEqual(rule.muteUpdateNotifications, true);
 }
 
-function testNeverUsedNoticeStartsWhenMessageCanBeSent() {
+function testMissingNeverUsedNoticeDateIsRepaired() {
   const ctx = context({
     stageKey: 'InactivityNotice',
     accountStatusKey: 'NeverUsed',
     stateKey: 'New',
-    noticeSent: 1000
+    noticeSent: null
   });
 
-  withMessageNeeded(true, function() {
-    assert.strictEqual(rule.guard(ctx), true);
-    rule.action(ctx);
-  });
+  assert.strictEqual(rule.guard(ctx), true);
+  rule.action(ctx);
 
-  assert.ok(ctx.issue.fields.InactivityNoticeSent > 1000);
+  assert.ok(ctx.issue.fields.InactivityNoticeSent > 0);
   assert.strictEqual(ctx.issue.fields.State, ctx.State.Pending);
   assert.strictEqual(ctx.issue.fields.RemovalReason, ctx.RemovalReason.NeverUsed);
 }
 
-function testDelayedDeletionNoticeReceivesFullSevenDays() {
+function testMissingDeletionGracePeriodIsRepaired() {
   const ctx = context({
     stageKey: 'SubjectToDeletion',
-    graceEnds: 1000
+    graceEnds: null
   });
 
   const originalNow = Date.now;
   Date.now = function() { return 2000; };
   try {
-    withMessageNeeded(true, function() {
-      assert.strictEqual(rule.guard(ctx), true);
-      rule.action(ctx);
-    });
+    assert.strictEqual(rule.guard(ctx), true);
+    rule.action(ctx);
   } finally {
     Date.now = originalNow;
   }
@@ -148,14 +138,41 @@ function testCompletePendingReviewIsLeftUntouched() {
     graceEnds: 1788331200000
   });
 
-  withMessageNeeded(false, function() {
-    assert.strictEqual(rule.guard(ctx), false);
+  assert.strictEqual(rule.guard(ctx), false);
+}
+
+function testExistingNoticeDateIsNeverRewrittenByLifecycleRepair() {
+  const ctx = context({
+    stageKey: 'InactivityNotice',
+    noticeSent: 1000,
+    removalReasonKey: 'Inactivity',
+    stateKey: 'New'
   });
+
+  assert.strictEqual(rule.guard(ctx), true);
+  rule.action(ctx);
+  assert.strictEqual(ctx.issue.fields.InactivityNoticeSent, 1000);
+  assert.strictEqual(ctx.issue.fields.State, ctx.State.Pending);
+}
+
+function testExistingGraceDateIsNeverRewrittenByLifecycleRepair() {
+  const ctx = context({
+    stageKey: 'SubjectToDeletion',
+    graceEnds: 5000,
+    stateKey: 'New'
+  });
+
+  assert.strictEqual(rule.guard(ctx), true);
+  rule.action(ctx);
+  assert.strictEqual(ctx.issue.fields.GracePeriodEnds, 5000);
+  assert.strictEqual(ctx.issue.fields.State, ctx.State.Pending);
 }
 
 testLegacyActivePendingReviewIsRetained();
-testNeverUsedNoticeStartsWhenMessageCanBeSent();
-testDelayedDeletionNoticeReceivesFullSevenDays();
+testMissingNeverUsedNoticeDateIsRepaired();
+testMissingDeletionGracePeriodIsRepaired();
 testCompletePendingReviewIsLeftUntouched();
+testExistingNoticeDateIsNeverRewrittenByLifecycleRepair();
+testExistingGraceDateIsNeverRewrittenByLifecycleRepair();
 
 console.log('CMA lifecycle catch-up tests passed');

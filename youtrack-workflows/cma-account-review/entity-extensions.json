@@ -1,0 +1,36 @@
+{
+  "entityTypeExtensions": [
+    {
+      "entityType": "Issue",
+      "properties": {
+        "cmaMessageStateVersion": {
+          "type": "integer"
+        },
+        "cmaMessageSequence": {
+          "type": "integer"
+        },
+        "cmaObservedReviewStage": {
+          "type": "string"
+        },
+        "cmaPendingMessageKey": {
+          "type": "string"
+        },
+        "cmaPendingMessageToken": {
+          "type": "string"
+        },
+        "cmaDeliveredMessageToken": {
+          "type": "string"
+        },
+        "cmaDeliveredMessageAt": {
+          "type": "integer"
+        },
+        "cmaAccountAuditConfirmedAt": {
+          "type": "integer"
+        },
+        "cmaSuppressedReviewStage": {
+          "type": "string"
+        }
+      }
+    }
+  ]
+}

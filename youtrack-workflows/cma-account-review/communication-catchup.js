@@ -2,14 +2,16 @@ const entities = require('@jetbrains/youtrack-scripting-api/entities');
 const communications = require('./communications');
 
 exports.rule = entities.Issue.onSchedule({
-  title: 'Send any missing CMA lifecycle messages',
+  title: 'Retry pending CMA manual outcome messages',
   search: 'project: CMA',
-  cron: '0 10 * * * ?',
+  cron: '0 10 10 * * ?',
   muteUpdateNotifications: false,
   modifyUpdatedProperties: false,
-  guard: (ctx) => communications.needsMessage(ctx.issue),
+  // Telemetry-driven notices are deliberately excluded. Only a successful
+  // account-audit pulse can release or advance those messages.
+  guard: (ctx) => communications.needsCatchUp(ctx.issue),
   action: (ctx) => {
-    communications.sendCurrentMessage(ctx.issue);
+    communications.sendCurrentMessage(ctx.issue, false);
   },
   requirements: {
     ReviewStage: {
@@ -20,15 +22,6 @@ exports.rule = entities.Issue.onSchedule({
       FinalReminder: {name: 'Final Reminder'},
       AccessRemoved: {name: 'Access Removed'},
       AccessRetained: {name: 'Access Retained'}
-    },
-    AccountStatus: {
-      type: entities.EnumField.fieldType,
-      name: 'Account Status',
-      NeverUsed: {name: 'Never Used'}
-    },
-    InactivityNoticeSent: {
-      type: entities.Field.dateType,
-      name: 'Inactivity Notice Sent'
     }
   }
 });

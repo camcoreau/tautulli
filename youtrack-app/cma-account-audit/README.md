@@ -18,8 +18,24 @@ the app never silently substitutes the automation account.
 The app must only be attached and activated for `CMA`. Its endpoint also rejects
 any other project short name.
 
+Every request is validated against the canonical account-state matrix before a
+ticket lookup. Existing tickets must have the same unique Helpdesk reporter as
+the incoming Plex email, and all required project fields and enum values are
+preflighted before any write. A successful atomic update pulses the private
+`Account Audit Confirmed At` date-and-time field for the CMA workflow to consume;
+failed or ambiguous requests never stamp freshness.
+
 ## Package
 
-Create a ZIP with `manifest.json` and `account-sync.js` at the archive root, then
-upload it from YouTrack Administration > Apps. Attach the app to Cameron-Media
-Account Administration after installation.
+From the repository root, run:
+
+```text
+python .github/scripts/package_cma_account_audit.py
+```
+
+This creates `dist/cma-account-audit.zip` with only `manifest.json` and
+`account-sync.js` at the archive root. The builder normalizes source line endings;
+CI prints the ZIP's SHA-256 and publishes it as the `cma-account-audit-app`
+artifact. Upload it as an in-place update from YouTrack Administration > Apps;
+do not create a duplicate app. Install the updated CMA workflow bridge first,
+and keep this app attached only to Cameron-Media Account Administration.
