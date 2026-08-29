@@ -10,7 +10,7 @@ services:
     environment:
       TAUTULLI_URL: http://tautulli:8181
       TAUTULLI_API_KEY: ${TAUTULLI_API_KEY}
-      YOUTRACK_URL: https://tasks.camcore.network
+      YOUTRACK_URL: https://support.camcore.au
       YOUTRACK_PROJECT_ID: CMA
       YOUTRACK_TOKEN: ${YOUTRACK_TOKEN}
       INACTIVE_DAYS: "60"
