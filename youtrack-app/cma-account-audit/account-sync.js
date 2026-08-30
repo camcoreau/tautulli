@@ -3,12 +3,30 @@ const search = require('@jetbrains/youtrack-scripting-api/search');
 
 const PROJECT_ID = 'CMA';
 const MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
+const MEMBER_NOTIFICATION_WINDOW_MS = 24 * 60 * 60 * 1000;
+const NOTIFICATION_POLICY_VERSION = 1;
+const NOTIFICATION_PROTOCOL_ID = 'cma-account-audit-member-notification';
+const NOTIFICATION_MODE_SUPPRESS = 'suppress';
+const NOTIFICATION_MODE_PERMIT = 'permit';
+const NOTIFICATION_DEFERRED_ACTION = 'member-notification-deferred';
+const NOTIFICATION_BUDGET_EXHAUSTED_ACTION =
+  'member-notification-budget-exhausted';
+const TICKET_CREATED_AWAITING_NOTICE_ACTION =
+  'ticket-created-awaiting-notice';
+const CYCLE_ID_PATTERN = /^audit-[0-9a-f]{32}$/;
 const ACCOUNT_STATUSES = ['Active', 'Inactive', 'Never Used'];
 const REVIEW_STAGES_IN_PROGRESS = [
   'Inactivity Notice',
   'Subject to Deletion',
   'Final Reminder',
   'Removal Due'
+];
+const MEMBER_MESSAGE_STAGES = [
+  'Inactivity Notice',
+  'Subject to Deletion',
+  'Final Reminder',
+  'Access Removed',
+  'Access Retained'
 ];
 
 function replyError(ctx, code, message) {
@@ -56,7 +74,9 @@ function validatePayload(payload, now) {
     lastStreamedMs: optionalInteger(payload, 'lastStreamedMs'),
     watchTime: requiredString(payload, 'watchTime'),
     accountStatus: requiredString(payload, 'accountStatus'),
-    reviewNeeded: payload.reviewNeeded
+    reviewNeeded: payload.reviewNeeded,
+    notificationMode: requiredString(payload, 'notificationMode'),
+    cycleId: requiredString(payload, 'cycleId')
   };
 
   if (typeof body.reviewNeeded !== 'boolean') {
@@ -99,6 +119,14 @@ function validatePayload(payload, now) {
   }
   if (body.accountStatus === 'Inactive' && !body.reviewNeeded) {
     throw new Error('Inactive requires reviewNeeded=true');
+  }
+  if (payload.notificationMode !== body.notificationMode ||
+      (body.notificationMode !== NOTIFICATION_MODE_SUPPRESS &&
+       body.notificationMode !== NOTIFICATION_MODE_PERMIT)) {
+    throw new Error('notificationMode must be suppress or permit');
+  }
+  if (payload.cycleId !== body.cycleId || !CYCLE_ID_PATTERN.test(body.cycleId)) {
+    throw new Error('cycleId must use the audit- prefix and 32 lowercase hex characters');
   }
   return body;
 }
@@ -222,8 +250,21 @@ function buildDescription(body) {
 function planReviewDecision(issue, body, previousAccountStatus) {
   const currentStage = issue ? stageName(issue) : null;
 
+  if (!issue) {
+    // Creating a Helpdesk ticket can notify its reporter. Keep the public
+    // inactivity notice in a later permit window so one request cannot release
+    // both the ticket-created email and a lifecycle-comment email.
+    return {
+      action: TICKET_CREATED_AWAITING_NOTICE_ACTION,
+      targetStage: 'Active'
+    };
+  }
+
+  const isStagedBeforeFirstNotice = currentStage === 'Active' &&
+    previousAccountStatus !== 'Active';
   if (body.accountStatus === 'Active' &&
-      REVIEW_STAGES_IN_PROGRESS.indexOf(currentStage) !== -1) {
+      (isStagedBeforeFirstNotice ||
+       REVIEW_STAGES_IN_PROGRESS.indexOf(currentStage) !== -1)) {
     return {action: 'retained', targetStage: 'Access Retained'};
   }
 
@@ -250,6 +291,92 @@ function planReviewDecision(issue, body, previousAccountStatus) {
   }
 
   return {action: 'notice-started', targetStage: 'Inactivity Notice'};
+}
+
+function isMemberNotificationCandidate(issue, plan) {
+  if (plan.action === TICKET_CREATED_AWAITING_NOTICE_ACTION) {
+    return true;
+  }
+  if (plan.targetStage && MEMBER_MESSAGE_STAGES.indexOf(plan.targetStage) !== -1) {
+    return true;
+  }
+  return Boolean(issue) && MEMBER_MESSAGE_STAGES.indexOf(stageName(issue)) !== -1;
+}
+
+function globalBudgetStorage(ctx) {
+  if (!ctx.globalStorage || !ctx.globalStorage.extensionProperties) {
+    throw new Error('CMA member-notification budget storage is unavailable');
+  }
+  return ctx.globalStorage.extensionProperties;
+}
+
+function notificationBudget(ctx, now) {
+  const storage = globalBudgetStorage(ctx);
+  const reservedAt = storage.cmaMemberNotificationReservedAt;
+  if (reservedAt === null || reservedAt === undefined || reservedAt === 0) {
+    return {storage: storage, available: true, remaining: 1};
+  }
+  if (!Number.isSafeInteger(reservedAt) || reservedAt <= 0 || reservedAt > now) {
+    throw new Error('CMA member-notification budget timestamp is invalid');
+  }
+  if (!CYCLE_ID_PATTERN.test(storage.cmaMemberNotificationCycleId || '') ||
+      typeof storage.cmaMemberNotificationPlexUserId !== 'string' ||
+      !storage.cmaMemberNotificationPlexUserId.trim()) {
+    throw new Error('CMA member-notification budget reservation is invalid');
+  }
+  const available = now - reservedAt >= MEMBER_NOTIFICATION_WINDOW_MS;
+  return {storage: storage, available: available, remaining: available ? 1 : 0};
+}
+
+function reserveNotificationBudget(budget, body, now) {
+  budget.storage.cmaMemberNotificationReservedAt = now;
+  budget.storage.cmaMemberNotificationCycleId = body.cycleId;
+  budget.storage.cmaMemberNotificationPlexUserId = body.plexUserId;
+  budget.available = false;
+  budget.remaining = 0;
+}
+
+function receipt(body, permitRequired, permitReserved, budgetRemaining) {
+  return {
+    notificationPolicyVersion: NOTIFICATION_POLICY_VERSION,
+    notificationMode: body.notificationMode,
+    cycleId: body.cycleId,
+    memberNotificationPermitRequired: permitRequired,
+    memberNotificationPermitReserved: permitReserved,
+    memberNotificationBudgetRemaining: budgetRemaining
+  };
+}
+
+function protocolReceipt() {
+  return {
+    appName: NOTIFICATION_PROTOCOL_ID,
+    notificationPolicyVersion: NOTIFICATION_POLICY_VERSION,
+    notificationModes: [NOTIFICATION_MODE_SUPPRESS, NOTIFICATION_MODE_PERMIT],
+    memberNotificationLimit: 1,
+    memberNotificationWindowSeconds: MEMBER_NOTIFICATION_WINDOW_MS / 1000
+  };
+}
+
+function deferredResponse(body, issue, plan, action, budgetRemaining) {
+  return Object.assign({
+    result: 'deferred',
+    action: action,
+    plannedAction: plan.action,
+    issueId: issue ? issue.id : null,
+    reviewStage: issue ? stageName(issue) : null,
+    plexUserId: body.plexUserId
+  }, receipt(body, true, false, budgetRemaining));
+}
+
+function plannedResponse(body, issue, plan, budgetRemaining) {
+  return Object.assign({
+    result: 'planned',
+    action: plan.action,
+    plannedAction: plan.action,
+    issueId: issue ? issue.id : null,
+    reviewStage: issue ? stageName(issue) : null,
+    plexUserId: body.plexUserId
+  }, receipt(body, false, false, budgetRemaining));
 }
 
 function preflightMutation(project, body, plan) {
@@ -303,9 +430,10 @@ exports.httpHandler = {
           return;
         }
 
+        const now = Date.now();
         let body;
         try {
-          body = validatePayload(ctx.request.json(), Date.now());
+          body = validatePayload(ctx.request.json(), now);
         } catch (error) {
           replyError(ctx, 400, error.message);
           return;
@@ -319,8 +447,21 @@ exports.httpHandler = {
           return;
         }
 
+        let budget;
+        try {
+          budget = notificationBudget(ctx, now);
+        } catch (error) {
+          replyError(ctx, 503, error.message);
+          return;
+        }
+
         if (!issue && !body.reviewNeeded) {
-          ctx.response.json({result: 'healthy-no-ticket', plexUserId: body.plexUserId});
+          ctx.response.json(plannedResponse(
+            body,
+            null,
+            {action: 'facts-only'},
+            budget.remaining
+          ));
           return;
         }
 
@@ -330,6 +471,14 @@ exports.httpHandler = {
             ctx,
             422,
             'No unique YouTrack Helpdesk reporter matches the Plex email address'
+          );
+          return;
+        }
+        if (sameUser(ctx.currentUser, reporter)) {
+          replyError(
+            ctx,
+            403,
+            'The CMA account-audit caller cannot be the ticket reporter'
           );
           return;
         }
@@ -352,6 +501,43 @@ exports.httpHandler = {
           return;
         }
 
+        const permitRequired = isMemberNotificationCandidate(issue, plan);
+        if (!permitRequired) {
+          // Both protocol modes are read-only until a member-visible operation
+          // requires and successfully reserves the single global permit.
+          ctx.response.json(plannedResponse(body, issue, plan, budget.remaining));
+          return;
+        }
+        if (permitRequired && body.notificationMode === NOTIFICATION_MODE_SUPPRESS) {
+          ctx.response.json(deferredResponse(
+            body,
+            issue,
+            plan,
+            NOTIFICATION_DEFERRED_ACTION,
+            budget.remaining
+          ));
+          return;
+        }
+        if (permitRequired && !budget.available) {
+          ctx.response.json(deferredResponse(
+            body,
+            issue,
+            plan,
+            NOTIFICATION_BUDGET_EXHAUSTED_ACTION,
+            0
+          ));
+          return;
+        }
+
+        const permitReserved = permitRequired &&
+          body.notificationMode === NOTIFICATION_MODE_PERMIT;
+        if (permitReserved) {
+          // Reserve the global allowance before creating or changing an issue.
+          // Any later exception escapes this handler so YouTrack rolls the
+          // reservation, issue fields and public comments back together.
+          reserveNotificationBudget(budget, body, now);
+        }
+
         const created = !issue;
         if (created) {
           issue = new entities.Issue(
@@ -367,14 +553,39 @@ exports.httpHandler = {
         // a partial audit.
         applyFacts(issue, body, values);
         applyReviewDecision(issue, plan, values);
-        issue.fields['Account Audit Confirmed At'] = Date.now();
-        ctx.response.json({
+        if (plan.action !== TICKET_CREATED_AWAITING_NOTICE_ACTION) {
+          issue.fields['Account Audit Confirmed At'] = now;
+        }
+        ctx.response.json(Object.assign({
           result: created ? 'created' : 'updated',
           action: plan.action,
+          plannedAction: plan.action,
           issueId: issue.id,
           reviewStage: stageName(issue),
           plexUserId: body.plexUserId
-        });
+        }, receipt(body, permitRequired, permitReserved, budget.remaining)));
+      }
+    },
+    {
+      scope: 'project',
+      method: 'GET',
+      path: 'protocol',
+      permissions: ['UPDATE_ISSUE'],
+      handle: function(ctx) {
+        if (ctx.project.shortName !== PROJECT_ID) {
+          replyError(ctx, 403, 'This endpoint can only be used with the CMA project');
+          return;
+        }
+        try {
+          // Validate the declared storage and any persisted reservation without
+          // changing either. The worker requires this exact read-only receipt
+          // before it enumerates accounts or calls the sync endpoint.
+          notificationBudget(ctx, Date.now());
+        } catch (error) {
+          replyError(ctx, 503, error.message);
+          return;
+        }
+        ctx.response.json(protocolReceipt());
       }
     }
   ],
@@ -424,4 +635,3 @@ exports.httpHandler = {
     }
   }
 };
-

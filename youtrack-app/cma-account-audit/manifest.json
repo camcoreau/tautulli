@@ -3,9 +3,9 @@
   "name": "cma-account-audit",
   "title": "CMA Account Audit",
   "description": "Project-scoped Tautulli account synchronization for Cameron-Media Account Administration.",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "minYouTrackVersion": "2025.3.0",
-  "changeNotes": "Fail closed on identity, reporter, transaction and telemetry conflicts; pulse audit-gated review automation; and require a new active baseline before restart.",
+  "changeNotes": "Add a pure read-only planning pass, a fail-closed one-per-24-hour member-notification budget, and split ticket creation from the first public notice.",
   "vendor": {
     "name": "CamCore.au",
     "url": "https://camcore.au",

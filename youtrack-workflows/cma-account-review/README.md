@@ -47,6 +47,22 @@ that can advance a ticket when an audit fails or omits the account. Missing,
 future, 24-hour-old or pre-message evidence fails closed. Manual `Access
 Retained` and `Access Removed` confirmations remain available without telemetry.
 
+The account-audit app and worker also gate every audit operation that could
+release a member-visible notification. A complete `suppress` pass is read-only
+for every account and identifies candidates without changing facts, stages,
+audit timestamps, comments or storage. Only one selected candidate
+can be repeated with both a durable local permit and an atomic
+`AppGlobalStorage` permit, limiting the integration to one member notification
+in any rolling 24-hour window. Non-candidates in either mode return a strict
+read-only `planned` receipt. Invalid or ambiguous receipts fail closed and do
+not mark the audit cycle complete.
+
+New Helpdesk tickets are created under one permit at the non-message `Active`
+review stage without an audit pulse. A later eligible daily permit moves the
+existing ticket to `Inactivity Notice` and releases the first public lifecycle
+comment. This keeps the Helpdesk ticket-created email and inactivity notice in
+separate 24-hour windows without changing any lifecycle message template.
+
 Lifecycle deadlines use the exact successful public-comment timestamp, not the
 date-only `Inactivity Notice Sent` or `Grace Period Ends` fields. The full seven
 days, six-day reminder interval and final 24 hours must elapse as timestamps.
@@ -88,12 +104,20 @@ the uploaded app and persist its extension properties. Use this order:
 3. Upload the same-name workflow app in place first. Confirm it is CMA-only, the
    bridge compiled and the old hourly notice/deadline rules no longer exist.
 4. Upload the same-name account-audit app in place and confirm it is CMA-only.
-5. Use one harmless ticket whose reporter is CamCore staff. A successful sync
-   must leave the transient field empty after the bridge stores the pulse
-   privately. Verify one message, its delivery properties, one audit-driven
-   transition and repeated checks with no duplicate.
-6. Review a worker dry run, deploy its immutable image, then resume the worker.
-   Reattach the manual-outcome retry only after the canary is clean.
+   This app update must precede the compatible worker because the live worker
+   requires the app's exact read-only protocol receipt before it enumerates
+   Tautulli accounts or sends any mutation-capable sync request.
+5. Use one harmless ticket whose reporter is CamCore staff. Verify the suppress
+   receipt performs no candidate write, then verify exactly one permitted sync.
+   A successful sync must leave the transient field empty after the bridge
+   stores the pulse privately. Verify one message, its delivery properties, one
+   audit-driven transition and repeated checks with no duplicate.
+6. Publish and verify the worker's immutable `master-<sha>` image. Deploy that
+   exact image with `DRY_RUN=true` and a fresh isolated clone of the preserved
+   live registry. Resume against `/data/registry.json` only after the projection
+   and staff-only canary prove the rolling 24-hour budget.
+7. Keep `communication-catchup` detached. Attaching it requires a separate,
+   explicitly reviewed change and is not part of this rollout.
 
 Do not use a real member ticket as the canary. If a change freeze cannot be
 guaranteed, validate on a separate YouTrack instance instead.
@@ -104,3 +128,7 @@ After an administrator removes the Cameron-Media share in Plex, they set
 date, records the acting administrator when available, solves the ticket and
 sends the confirmation message. The workflow also derives `Removal Reason` from
 the account status when a review begins.
+
+This rollout does not change Support, Operations overdue workflows, CMA
+lifecycle rules or public message text, sender configuration, real ticket
+reporters, or Plex access.

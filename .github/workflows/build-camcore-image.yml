@@ -93,6 +93,7 @@ jobs:
           python3 -m py_compile camcore-account-audit/audit.py
           python3 -m unittest discover -s camcore-account-audit/tests -v
           python3 -m json.tool youtrack-app/cma-account-audit/manifest.json > /dev/null
+          python3 -m json.tool youtrack-app/cma-account-audit/entity-extensions.json > /dev/null
           python3 -m json.tool youtrack-workflows/cma-account-review/manifest.json > /dev/null
           python3 -m json.tool youtrack-workflows/cma-account-review/entity-extensions.json > /dev/null
           python3 -m json.tool youtrack-workflows/camcore-due-date-notifications/manifest.json > /dev/null

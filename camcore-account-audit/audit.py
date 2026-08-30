@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import sys
@@ -10,6 +11,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -20,6 +22,39 @@ UTC = timezone.utc
 DEFAULT_USER_AGENT = "CamCore-CMA-Account-Audit/1.0"
 JS_MAX_SAFE_INTEGER = (2**53) - 1
 MAX_FUTURE_CLOCK_SKEW = timedelta(minutes=5)
+MEMBER_NOTIFICATION_WINDOW = timedelta(hours=24)
+NOTIFICATION_POLICY_VERSION = 1
+NOTIFICATION_PROTOCOL_ID = "cma-account-audit-member-notification"
+NOTIFICATION_PROTOCOL_MODES = ("suppress", "permit")
+NOTIFICATION_MODE_SUPPRESS = "suppress"
+NOTIFICATION_MODE_PERMIT = "permit"
+NOTIFICATION_DEFERRED_ACTION = "member-notification-deferred"
+NOTIFICATION_BUDGET_EXHAUSTED_ACTION = "member-notification-budget-exhausted"
+TICKET_CREATED_AWAITING_NOTICE_ACTION = "ticket-created-awaiting-notice"
+NOTIFICATION_GATE_STATUSES = frozenset(
+    {
+        "reserved",
+        "confirmed",
+        "server-budget-exhausted",
+        "no-longer-required",
+    }
+)
+NOTIFICATION_PLANNED_ACTIONS = frozenset(
+    {
+        "facts-only",
+        "notice-restarted-after-active-baseline",
+        "notice-started",
+        "protected-terminal-stage",
+        "retained",
+        "retained-awaiting-new-active-baseline",
+        "review-already-in-progress",
+        TICKET_CREATED_AWAITING_NOTICE_ACTION,
+    }
+)
+# A current message stage can require a permit even when its account-plan action
+# is otherwise facts-only or terminal. The endpoint is the authority on that
+# stage-sensitive decision; the worker only accepts actions from this closed set.
+NOTIFICATION_PERMIT_ACTIONS = NOTIFICATION_PLANNED_ACTIONS
 
 
 class ConfigurationError(RuntimeError):
@@ -187,6 +222,8 @@ class JsonHttpClient:
             ) from exc
         except urllib.error.URLError as exc:
             raise RemoteApiError(f"{method} {display_url} failed: {exc.reason}") from exc
+        except (OSError, http.client.HTTPException) as exc:
+            raise RemoteApiError(f"{method} {display_url} failed: {exc}") from exc
 
         if not payload:
             return None
@@ -242,7 +279,32 @@ class YouTrackClient:
         self.config = config
         self.http = http
 
-    def sync(self, account: Account, decision: Decision) -> Any:
+    def protocol(self) -> Any:
+        parsed = urllib.parse.urlsplit(self.config.youtrack_sync_url)
+        sync_path = parsed.path.rstrip("/")
+        parent_path, separator, _ = sync_path.rpartition("/")
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or not separator
+        ):
+            raise ConfigurationError("YOUTRACK_SYNC_URL cannot locate its protocol endpoint")
+        protocol_url = urllib.parse.urlunsplit(
+            (parsed.scheme, parsed.netloc, parent_path + "/protocol", "", "")
+        )
+        return self.http.request(
+            protocol_url,
+            headers={"Authorization": f"Bearer {self.config.youtrack_token}"},
+        )
+
+    def sync(
+        self,
+        account: Account,
+        decision: Decision,
+        *,
+        notification_mode: str,
+        cycle_id: str,
+    ) -> Any:
         payload = {
             "plexUserId": account.user_id,
             "plexUsername": account.username,
@@ -258,6 +320,8 @@ class YouTrackClient:
             "accountStatus": decision.account_status,
             "reviewNeeded": decision.review_needed,
             "reviewReason": decision.reason,
+            "notificationMode": notification_mode,
+            "cycleId": cycle_id,
         }
         return self.http.request(
             self.config.youtrack_sync_url,
@@ -267,10 +331,78 @@ class YouTrackClient:
         )
 
 
+class RegistryLock:
+    """Hold one non-blocking, cross-process lock for a complete audit run."""
+
+    def __init__(self, registry_path: Path):
+        self.path = registry_path.with_name(registry_path.name + ".lock")
+        self._handle: Any | None = None
+
+    def __enter__(self) -> "RegistryLock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            handle = self.path.open("a+b")
+        except OSError as exc:
+            raise ConfigurationError(
+                f"Cannot open exclusive registry lock {self.path}: {exc}"
+            ) from exc
+
+        try:
+            # Windows byte-range locks require the selected byte to exist. Keep
+            # the lock file permanently so deleting/recreating its inode cannot
+            # let a second process bypass a lock held by the first.
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (ImportError, OSError) as exc:
+            handle.close()
+            raise ConfigurationError(
+                f"Cannot acquire exclusive registry lock {self.path}: {exc}"
+            ) from exc
+
+        self._handle = handle
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        del exc_type, exc, traceback
+        handle = self._handle
+        self._handle = None
+        if handle is None:
+            return
+        try:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
 class Registry:
     def __init__(self, path: Path):
         self.path = path
-        self.data: dict[str, Any] = {"schemaVersion": 1, "users": {}}
+        self.data: dict[str, Any] = {
+            # Keep the original schema marker so the previous worker can load
+            # this file during rollback and preserve the additional safety keys.
+            "schemaVersion": 1,
+            "users": {},
+            "memberNotificationPermitHistory": {},
+        }
 
     def load(self) -> None:
         if not self.path.exists():
@@ -279,9 +411,153 @@ class Registry:
             loaded = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ConfigurationError(f"Cannot read registry {self.path}: {exc}") from exc
-        if loaded.get("schemaVersion") != 1 or not isinstance(loaded.get("users"), dict):
+        if not isinstance(loaded, dict):
             raise ConfigurationError(f"Unsupported registry format in {self.path}")
+        schema_version = loaded.get("schemaVersion")
+        if (
+            isinstance(schema_version, bool)
+            or schema_version != 1
+            or not isinstance(loaded.get("users"), dict)
+        ):
+            raise ConfigurationError(f"Unsupported registry format in {self.path}")
+        loaded.setdefault("memberNotificationPermitHistory", {})
         self.data = loaded
+        self._notification_gate()
+        self._notification_permit_history()
+
+    def _notification_permit_history(self) -> dict[str, str]:
+        history = self.data.setdefault("memberNotificationPermitHistory", {})
+        if not isinstance(history, dict):
+            raise ConfigurationError(
+                f"Invalid memberNotificationPermitHistory in {self.path}"
+            )
+        for plex_user_id, reserved_at_raw in history.items():
+            if not isinstance(plex_user_id, str) or not plex_user_id.strip():
+                raise ConfigurationError(
+                    f"Invalid memberNotificationPermitHistory Plex user ID in {self.path}"
+                )
+            try:
+                reserved_at = datetime.fromisoformat(reserved_at_raw)
+            except (TypeError, ValueError) as exc:
+                raise ConfigurationError(
+                    f"Invalid memberNotificationPermitHistory timestamp in {self.path}"
+                ) from exc
+            if reserved_at.tzinfo is None or reserved_at.utcoffset() is None:
+                raise ConfigurationError(
+                    f"Invalid memberNotificationPermitHistory timezone in {self.path}"
+                )
+        return history
+
+    def _notification_gate(self) -> tuple[dict[str, Any], datetime] | None:
+        gate = self.data.get("memberNotificationGate")
+        if gate is None:
+            return None
+        if not isinstance(gate, dict):
+            raise ConfigurationError(
+                f"Invalid memberNotificationGate in {self.path}"
+            )
+        policy_version = gate.get("policyVersion")
+        if (
+            isinstance(policy_version, bool)
+            or not isinstance(policy_version, int)
+            or policy_version != NOTIFICATION_POLICY_VERSION
+        ):
+            raise ConfigurationError(
+                f"Invalid memberNotificationGate policy version in {self.path}"
+            )
+        if not isinstance(gate.get("cycleId"), str) or not gate["cycleId"].strip():
+            raise ConfigurationError(
+                f"Invalid memberNotificationGate cycle ID in {self.path}"
+            )
+        if not isinstance(gate.get("plexUserId"), str) or not gate[
+            "plexUserId"
+        ].strip():
+            raise ConfigurationError(
+                f"Invalid memberNotificationGate Plex user ID in {self.path}"
+            )
+        if gate.get("status") not in NOTIFICATION_GATE_STATUSES:
+            raise ConfigurationError(
+                f"Invalid memberNotificationGate status in {self.path}"
+            )
+        try:
+            reserved_at = datetime.fromisoformat(gate["reservedAt"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ConfigurationError(
+                f"Invalid memberNotificationGate reservation in {self.path}"
+            ) from exc
+        if reserved_at.tzinfo is None or reserved_at.utcoffset() is None:
+            raise ConfigurationError(
+                f"Invalid memberNotificationGate reservation timezone in {self.path}"
+            )
+        return gate, reserved_at.astimezone(UTC)
+
+    def notification_permit_available(self, observed_at: datetime) -> bool:
+        if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+            raise ConfigurationError("Audit observation time must include a timezone")
+        observed_at = observed_at.astimezone(UTC)
+        for reserved_at_raw in self._notification_permit_history().values():
+            reserved_at = datetime.fromisoformat(reserved_at_raw).astimezone(UTC)
+            if reserved_at > observed_at + MAX_FUTURE_CLOCK_SKEW:
+                raise ConfigurationError(
+                    f"memberNotificationPermitHistory reservation is in the future in {self.path}"
+                )
+        gate_state = self._notification_gate()
+        if gate_state is None:
+            return True
+        _, reserved_at = gate_state
+        if reserved_at > observed_at + MAX_FUTURE_CLOCK_SKEW:
+            raise ConfigurationError(
+                f"memberNotificationGate reservation is in the future in {self.path}"
+            )
+        return observed_at - reserved_at >= MEMBER_NOTIFICATION_WINDOW
+
+    def reserve_notification_permit(
+        self,
+        *,
+        cycle_id: str,
+        account: Account,
+        observed_at: datetime,
+    ) -> None:
+        if not self.notification_permit_available(observed_at):
+            raise ConfigurationError("Member-notification permit is already reserved")
+        self.data["memberNotificationGate"] = {
+            "policyVersion": NOTIFICATION_POLICY_VERSION,
+            "cycleId": cycle_id,
+            "plexUserId": account.user_id,
+            "reservedAt": observed_at.isoformat(),
+            "status": "reserved",
+        }
+        self._notification_permit_history()[account.user_id] = observed_at.isoformat()
+        # Persist before the remote call. An ambiguous timeout therefore consumes
+        # the local permit instead of allowing a restart to send another message.
+        self.save()
+
+    def confirm_notification_permit(self, *, cycle_id: str, status: str) -> None:
+        if status not in NOTIFICATION_GATE_STATUSES - {"reserved"}:
+            raise ConfigurationError("Invalid member-notification permit status")
+        gate_state = self._notification_gate()
+        if gate_state is None or gate_state[0].get("cycleId") != cycle_id:
+            raise ConfigurationError("Member-notification permit reservation is missing")
+        gate = gate_state[0]
+        if gate.get("status") != "reserved":
+            raise ConfigurationError("Member-notification permit is not reserved")
+        gate["status"] = status
+        self.save()
+
+    def last_notification_permit_at(
+        self,
+        account: Account,
+        observed_at: datetime,
+    ) -> datetime:
+        raw = self._notification_permit_history().get(account.user_id)
+        if raw is None:
+            return datetime.min.replace(tzinfo=UTC)
+        reserved_at = datetime.fromisoformat(raw).astimezone(UTC)
+        if reserved_at > observed_at.astimezone(UTC) + MAX_FUTURE_CLOCK_SKEW:
+            raise ConfigurationError(
+                f"memberNotificationPermitHistory reservation is in the future in {self.path}"
+            )
+        return reserved_at
 
     def first_seen(self, account: Account, observed_at: datetime) -> datetime:
         users = self.data["users"]
@@ -310,6 +586,139 @@ class Registry:
             encoding="utf-8",
         )
         os.replace(temp_path, self.path)
+
+
+def validate_sync_response(
+    response: Any,
+    *,
+    notification_mode: str,
+    cycle_id: str,
+    plex_user_id: str,
+) -> dict[str, Any]:
+    if not isinstance(response, dict):
+        raise RemoteApiError("YouTrack account sync returned an invalid response")
+    policy_version = response.get("notificationPolicyVersion")
+    if (
+        isinstance(policy_version, bool)
+        or not isinstance(policy_version, int)
+        or policy_version != NOTIFICATION_POLICY_VERSION
+    ):
+        raise RemoteApiError("YouTrack account sync notification policy is incompatible")
+    if response.get("notificationMode") != notification_mode:
+        raise RemoteApiError("YouTrack account sync returned the wrong notification mode")
+    if response.get("cycleId") != cycle_id:
+        raise RemoteApiError("YouTrack account sync returned the wrong cycle ID")
+    if response.get("plexUserId") != plex_user_id:
+        raise RemoteApiError("YouTrack account sync returned the wrong Plex user ID")
+    if not isinstance(response.get("memberNotificationPermitRequired"), bool):
+        raise RemoteApiError("YouTrack account sync omitted its permit requirement")
+    if not isinstance(response.get("memberNotificationPermitReserved"), bool):
+        raise RemoteApiError("YouTrack account sync omitted its permit receipt")
+    remaining = response.get("memberNotificationBudgetRemaining")
+    if (
+        isinstance(remaining, bool)
+        or not isinstance(remaining, int)
+        or remaining not in (0, 1)
+    ):
+        raise RemoteApiError("YouTrack account sync returned an invalid notification budget")
+
+    permit_required = response["memberNotificationPermitRequired"]
+    permit_reserved = response["memberNotificationPermitReserved"]
+    action = response.get("action")
+    result = response.get("result")
+    planned_action = response.get("plannedAction")
+    if planned_action not in NOTIFICATION_PLANNED_ACTIONS:
+        raise RemoteApiError("YouTrack account sync returned an invalid planned action")
+    if notification_mode == NOTIFICATION_MODE_SUPPRESS:
+        if permit_reserved:
+            raise RemoteApiError("Suppress mode unexpectedly reserved a notification permit")
+        if permit_required:
+            if planned_action not in NOTIFICATION_PERMIT_ACTIONS or (
+                result != "deferred" or action != NOTIFICATION_DEFERRED_ACTION
+            ):
+                raise RemoteApiError("Suppress mode returned an unsafe candidate response")
+        elif result != "planned" or action != planned_action:
+            raise RemoteApiError("Suppress mode returned a non-read-only plan response")
+    elif notification_mode == NOTIFICATION_MODE_PERMIT:
+        exhausted = (
+            result == "deferred" and action == NOTIFICATION_BUDGET_EXHAUSTED_ACTION
+        )
+        if permit_required:
+            if planned_action not in NOTIFICATION_PERMIT_ACTIONS:
+                raise RemoteApiError("Permit mode returned an unsafe planned action")
+            if permit_reserved:
+                if exhausted or result not in {"created", "updated"} or action != planned_action:
+                    raise RemoteApiError(
+                        "Permit mode returned a contradictory notification receipt"
+                    )
+                if remaining != 0:
+                    raise RemoteApiError("Permit mode did not consume its notification budget")
+            elif not exhausted or remaining != 0:
+                raise RemoteApiError(
+                    "Permit mode returned an indeterminate notification receipt"
+                )
+        elif (
+            permit_reserved
+            or exhausted
+            or result != "planned"
+            or action != planned_action
+        ):
+            raise RemoteApiError("Permit mode returned an invalid read-only plan receipt")
+    else:
+        raise RemoteApiError("Unsupported notification mode")
+    return response
+
+
+def validate_protocol_response(response: Any) -> dict[str, Any]:
+    expected_keys = {
+        "appName",
+        "notificationPolicyVersion",
+        "notificationModes",
+        "memberNotificationLimit",
+        "memberNotificationWindowSeconds",
+    }
+    if not isinstance(response, dict) or set(response) != expected_keys:
+        raise RemoteApiError("YouTrack account sync protocol receipt is incompatible")
+    if response.get("appName") != NOTIFICATION_PROTOCOL_ID:
+        raise RemoteApiError("YouTrack account sync protocol identity is incompatible")
+    policy_version = response.get("notificationPolicyVersion")
+    if (
+        isinstance(policy_version, bool)
+        or not isinstance(policy_version, int)
+        or policy_version != NOTIFICATION_POLICY_VERSION
+    ):
+        raise RemoteApiError("YouTrack account sync notification policy is incompatible")
+    if response.get("notificationModes") != list(NOTIFICATION_PROTOCOL_MODES):
+        raise RemoteApiError("YouTrack account sync protocol modes are incompatible")
+    member_limit = response.get("memberNotificationLimit")
+    if (
+        isinstance(member_limit, bool)
+        or not isinstance(member_limit, int)
+        or member_limit != 1
+    ):
+        raise RemoteApiError("YouTrack account sync notification limit is incompatible")
+    window_seconds = response.get("memberNotificationWindowSeconds")
+    if (
+        isinstance(window_seconds, bool)
+        or not isinstance(window_seconds, int)
+        or window_seconds != int(MEMBER_NOTIFICATION_WINDOW.total_seconds())
+    ):
+        raise RemoteApiError("YouTrack account sync notification window is incompatible")
+    return response
+
+
+def candidate_priority(response: dict[str, Any]) -> int:
+    planned_action = response.get("plannedAction")
+    priorities = {
+        "retained": 0,
+        "notice-started": 1,
+        "notice-restarted-after-active-baseline": 1,
+        "review-already-in-progress": 2,
+        # Ticket creation can notify the reporter, but it should not start a
+        # second member-visible notice until existing notice work is drained.
+        TICKET_CREATED_AWAITING_NOTICE_ACTION: 3,
+    }
+    return priorities.get(planned_action, 3)
 
 
 def required_non_negative_int(name: str, value: Any) -> int:
@@ -455,11 +864,31 @@ def run_once(config: Config, observed_at: datetime | None = None) -> int:
     tautulli = TautulliClient(config, http)
     youtrack = YouTrackClient(config, http)
     registry = Registry(config.registry_path)
+    if not config.dry_run:
+        # This read-only endpoint does not exist in the legacy app. Prove exact
+        # suppress/permit compatibility before enumerating accounts or sending
+        # any mutation-capable account request.
+        validate_protocol_response(youtrack.protocol())
+    # Serialize the entire registry and remote-sync cycle. A second process
+    # fails immediately instead of reading a stale gate or racing a reservation.
+    with RegistryLock(config.registry_path):
+        return _run_once_locked(config, observed_at, tautulli, youtrack, registry)
+
+
+def _run_once_locked(
+    config: Config,
+    observed_at: datetime,
+    tautulli: TautulliClient,
+    youtrack: YouTrackClient,
+    registry: Registry,
+) -> int:
     registry.load()
+    cycle_id = "audit-" + uuid.uuid4().hex
 
     errors = 0
     processed = 0
     excluded = 0
+    entries: list[dict[str, Any]] = []
     for account in tautulli.accounts():
         if account.username.casefold() in config.excluded_users:
             excluded += 1
@@ -479,16 +908,52 @@ def run_once(config: Config, observed_at: datetime | None = None) -> int:
             "account": public_account(account),
             "decision": asdict(decision),
             "dryRun": config.dry_run,
+            "cycleId": cycle_id,
         }
+        entries.append({"account": account, "decision": decision, "event": event})
 
-        if config.dry_run:
-            print(json.dumps(event, sort_keys=True))
+    if config.dry_run:
+        for entry in entries:
+            print(json.dumps(entry["event"], sort_keys=True))
             processed += 1
-            continue
+        registry.data["lastCompletedAt"] = observed_at.isoformat()
+        registry.save()
+        print(
+            json.dumps(
+                {
+                    "event": "complete",
+                    "processed": processed,
+                    "excluded": excluded,
+                    "errors": errors,
+                    "notificationCandidates": 0,
+                    "notificationPermitStatus": "dry-run",
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
 
+    candidates: list[dict[str, Any]] = []
+    for entry in entries:
+        account = entry["account"]
+        decision = entry["decision"]
+        event = entry["event"]
         try:
-            event["youtrack"] = youtrack.sync(account, decision)
-            print(json.dumps(event, sort_keys=True))
+            response = youtrack.sync(
+                account,
+                decision,
+                notification_mode=NOTIFICATION_MODE_SUPPRESS,
+                cycle_id=cycle_id,
+            )
+            response = validate_sync_response(
+                response,
+                notification_mode=NOTIFICATION_MODE_SUPPRESS,
+                cycle_id=cycle_id,
+                plex_user_id=account.user_id,
+            )
+            event["youtrackSuppress"] = response
+            if response["memberNotificationPermitRequired"]:
+                candidates.append({**entry, "suppress": response})
             processed += 1
         except RemoteApiError as exc:
             errors += 1
@@ -496,6 +961,7 @@ def run_once(config: Config, observed_at: datetime | None = None) -> int:
                 json.dumps(
                     {
                         "event": "sync-error",
+                        "phase": NOTIFICATION_MODE_SUPPRESS,
                         "username": account.username,
                         "message": str(exc),
                     }
@@ -503,7 +969,81 @@ def run_once(config: Config, observed_at: datetime | None = None) -> int:
                 file=sys.stderr,
             )
 
-    registry.data["lastCompletedAt"] = observed_at.isoformat()
+    permit_status = "not-needed"
+    if candidates:
+        permit_status = "deferred"
+    # A daily scheduler can start the next cycle before 24 hours have elapsed
+    # from the previous cycle's later outbound permit. Recheck against the
+    # actual permit-attempt clock after suppression so a safe candidate is not
+    # unnecessarily deferred until the following day. Keep observed_at fixed
+    # for account classification and fail safely if the clock moves backwards.
+    permit_attempt_at = max(observed_at.astimezone(UTC), utc_now())
+    permit_available = registry.notification_permit_available(permit_attempt_at)
+    if errors == 0 and candidates and permit_available:
+        selected = min(
+            candidates,
+            key=lambda item: (
+                candidate_priority(item["suppress"]),
+                registry.last_notification_permit_at(item["account"], observed_at),
+                item["account"].username.casefold(),
+                item["account"].user_id,
+            ),
+        )
+        selected_account = selected["account"]
+        registry.reserve_notification_permit(
+            cycle_id=cycle_id,
+            account=selected_account,
+            observed_at=permit_attempt_at,
+        )
+        permit_status = "reserved"
+        try:
+            permit_response = youtrack.sync(
+                selected_account,
+                selected["decision"],
+                notification_mode=NOTIFICATION_MODE_PERMIT,
+                cycle_id=cycle_id,
+            )
+            permit_response = validate_sync_response(
+                permit_response,
+                notification_mode=NOTIFICATION_MODE_PERMIT,
+                cycle_id=cycle_id,
+                plex_user_id=selected_account.user_id,
+            )
+            selected["event"]["youtrackPermit"] = permit_response
+            if permit_response["memberNotificationPermitReserved"]:
+                permit_status = "confirmed"
+            elif permit_response.get("action") == NOTIFICATION_BUDGET_EXHAUSTED_ACTION:
+                permit_status = "server-budget-exhausted"
+            else:
+                permit_status = "no-longer-required"
+            registry.confirm_notification_permit(
+                cycle_id=cycle_id,
+                status=permit_status,
+            )
+        except RemoteApiError as exc:
+            errors += 1
+            permit_status = "ambiguous-failure"
+            print(
+                json.dumps(
+                    {
+                        "event": "sync-error",
+                        "phase": NOTIFICATION_MODE_PERMIT,
+                        "username": selected_account.username,
+                        "message": str(exc),
+                    }
+                ),
+                file=sys.stderr,
+            )
+    elif errors == 0 and candidates and not permit_available:
+        permit_status = "local-budget-exhausted"
+    elif errors:
+        permit_status = "blocked-by-suppress-errors"
+
+    for entry in entries:
+        print(json.dumps(entry["event"], sort_keys=True))
+
+    if errors == 0:
+        registry.data["lastCompletedAt"] = observed_at.isoformat()
     registry.save()
     print(
         json.dumps(
@@ -512,6 +1052,8 @@ def run_once(config: Config, observed_at: datetime | None = None) -> int:
                 "processed": processed,
                 "excluded": excluded,
                 "errors": errors,
+                "notificationCandidates": len(candidates),
+                "notificationPermitStatus": permit_status,
             },
             sort_keys=True,
         )
