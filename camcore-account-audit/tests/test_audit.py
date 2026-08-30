@@ -1116,6 +1116,19 @@ class RunOnceTests(unittest.TestCase):
                 registry.notification_permit_available(NOW + timedelta(hours=26))
             )
 
+            second_exit_code, second_calls, _, _ = self.run_worker(
+                accounts=[target],
+                registry_path=path,
+                responder=responder,
+                observed_at=NOW + timedelta(hours=24),
+                clock_at=permit_at + timedelta(hours=24),
+            )
+            self.assertEqual(0, second_exit_code)
+            self.assertEqual(
+                ["suppress", "permit"],
+                [item["notification_mode"] for item in second_calls],
+            )
+
     def test_any_suppress_error_blocks_permit_and_last_completed_update(self):
         candidates = [
             self.inactive_account(username="alpha", user_id="1"),
