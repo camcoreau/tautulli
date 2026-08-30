@@ -1,8 +1,15 @@
 import importlib.util
+import io
+import json
+import subprocess
 import sys
+import tempfile
+import time
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "audit.py"
@@ -17,15 +24,92 @@ UTC = timezone.utc
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
 
 
-def account(*, plays=1, last_streamed=None, username="member"):
+def account(
+    *,
+    plays=1,
+    last_streamed=None,
+    username="member",
+    user_id="42",
+    email="member@example.invalid",
+):
     return audit.Account(
-        user_id="42",
+        user_id=user_id,
         username=username,
-        email="member@example.invalid",
+        email=email,
         last_streamed=last_streamed,
         total_plays=plays,
         watch_seconds=3600,
     )
+
+
+def config(registry_path, *, dry_run=False):
+    return audit.Config(
+        tautulli_url="https://tautulli.example.invalid",
+        tautulli_api_key="test",
+        youtrack_sync_url=(
+            "https://youtrack.example.invalid/api/admin/projects/CMA/"
+            "extensionEndpoints/cma-account-audit/account-sync/sync-account"
+        ),
+        youtrack_token="test",
+        registry_path=Path(registry_path),
+        dry_run=dry_run,
+    )
+
+
+def sync_receipt(
+    *,
+    notification_mode,
+    cycle_id,
+    plex_user_id,
+    planned_action="facts-only",
+    permit_required=False,
+    permit_reserved=False,
+    budget_remaining=1,
+    result=None,
+    action=None,
+):
+    if result is None:
+        result = "updated"
+    if action is None:
+        action = planned_action
+    return {
+        "notificationPolicyVersion": audit.NOTIFICATION_POLICY_VERSION,
+        "notificationMode": notification_mode,
+        "cycleId": cycle_id,
+        "plexUserId": plex_user_id,
+        "memberNotificationPermitRequired": permit_required,
+        "memberNotificationPermitReserved": permit_reserved,
+        "memberNotificationBudgetRemaining": budget_remaining,
+        "plannedAction": planned_action,
+        "result": result,
+        "action": action,
+    }
+
+
+def deferred_receipt(*, cycle_id, plex_user_id, planned_action):
+    return sync_receipt(
+        notification_mode=audit.NOTIFICATION_MODE_SUPPRESS,
+        cycle_id=cycle_id,
+        plex_user_id=plex_user_id,
+        planned_action=planned_action,
+        permit_required=True,
+        result="deferred",
+        action=audit.NOTIFICATION_DEFERRED_ACTION,
+    )
+
+
+def protocol_receipt(**overrides):
+    receipt = {
+        "appName": audit.NOTIFICATION_PROTOCOL_ID,
+        "notificationPolicyVersion": audit.NOTIFICATION_POLICY_VERSION,
+        "notificationModes": list(audit.NOTIFICATION_PROTOCOL_MODES),
+        "memberNotificationLimit": 1,
+        "memberNotificationWindowSeconds": int(
+            audit.MEMBER_NOTIFICATION_WINDOW.total_seconds()
+        ),
+    }
+    receipt.update(overrides)
+    return receipt
 
 
 class ClassificationTests(unittest.TestCase):
@@ -273,6 +357,1006 @@ class RegistryTests(unittest.TestCase):
         second = registry.first_seen(account(), NOW)
 
         self.assertEqual(first, second)
+
+    def test_v1_registry_adds_and_preserves_backward_compatible_safety_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            original = {
+                "schemaVersion": 1,
+                "users": {
+                    "42": {
+                        "firstSeenAt": (NOW - timedelta(days=20)).isoformat(),
+                        "lastSeenAt": NOW.isoformat(),
+                        "username": "member",
+                    }
+                },
+                "lastCompletedAt": (NOW - timedelta(days=1)).isoformat(),
+                "rollbackSentinel": {"preserve": True},
+            }
+            path.write_text(json.dumps(original), encoding="utf-8")
+
+            registry = audit.Registry(path)
+            registry.load()
+
+            self.assertEqual(1, registry.data["schemaVersion"])
+            self.assertEqual(original["users"], registry.data["users"])
+            self.assertEqual(
+                original["lastCompletedAt"], registry.data["lastCompletedAt"]
+            )
+            self.assertEqual(
+                original["rollbackSentinel"], registry.data["rollbackSentinel"]
+            )
+            self.assertEqual({}, registry.data["memberNotificationPermitHistory"])
+
+            registry.reserve_notification_permit(
+                cycle_id="audit-" + "a" * 32,
+                account=account(),
+                observed_at=NOW,
+            )
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(1, saved["schemaVersion"])
+            self.assertEqual(
+                original["rollbackSentinel"], saved["rollbackSentinel"]
+            )
+            self.assertIn("memberNotificationGate", saved)
+            self.assertIn("42", saved["memberNotificationPermitHistory"])
+
+    def test_notification_permit_is_reserved_for_a_full_twenty_four_hours(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            registry = audit.Registry(path)
+            target = account()
+            registry.reserve_notification_permit(
+                cycle_id="audit-" + "a" * 32,
+                account=target,
+                observed_at=NOW,
+            )
+
+            self.assertFalse(
+                registry.notification_permit_available(
+                    NOW + timedelta(hours=23, minutes=59, seconds=59)
+                )
+            )
+            self.assertTrue(
+                registry.notification_permit_available(NOW + timedelta(hours=24))
+            )
+            self.assertEqual(
+                NOW,
+                registry.last_notification_permit_at(target, NOW),
+            )
+
+            reloaded = audit.Registry(path)
+            reloaded.load()
+            self.assertFalse(
+                reloaded.notification_permit_available(NOW + timedelta(hours=1))
+            )
+
+    def test_invalid_notification_state_fails_closed_on_load(self):
+        invalid_gates = [
+            "not-an-object",
+            {
+                "policyVersion": True,
+                "cycleId": "audit-" + "a" * 32,
+                "plexUserId": "42",
+                "reservedAt": NOW.isoformat(),
+                "status": "reserved",
+            },
+            {
+                "policyVersion": 1.0,
+                "cycleId": "audit-" + "a" * 32,
+                "plexUserId": "42",
+                "reservedAt": NOW.isoformat(),
+                "status": "reserved",
+            },
+            {
+                "policyVersion": 1,
+                "cycleId": "",
+                "plexUserId": "42",
+                "reservedAt": NOW.isoformat(),
+                "status": "reserved",
+            },
+            {
+                "policyVersion": 1,
+                "cycleId": "audit-" + "a" * 32,
+                "plexUserId": "42",
+                "reservedAt": NOW.replace(tzinfo=None).isoformat(),
+                "status": "reserved",
+            },
+            {
+                "policyVersion": 1,
+                "cycleId": "audit-" + "a" * 32,
+                "plexUserId": "42",
+                "reservedAt": NOW.isoformat(),
+                "status": "unknown",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            for index, gate in enumerate(invalid_gates):
+                with self.subTest(index=index):
+                    path = Path(directory) / f"registry-{index}.json"
+                    path.write_text(
+                        json.dumps(
+                            {
+                                "schemaVersion": 1,
+                                "users": {},
+                                "memberNotificationPermitHistory": {},
+                                "memberNotificationGate": gate,
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    with self.assertRaises(audit.ConfigurationError):
+                        audit.Registry(path).load()
+
+    def test_non_v1_schema_still_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            for schema_version in [2, True, "1", None]:
+                with self.subTest(schema_version=schema_version):
+                    path.write_text(
+                        json.dumps({"schemaVersion": schema_version, "users": {}}),
+                        encoding="utf-8",
+                    )
+                    with self.assertRaises(audit.ConfigurationError):
+                        audit.Registry(path).load()
+
+
+class RegistryLockTests(unittest.TestCase):
+    def test_registry_lock_is_exclusive_across_processes_and_releases(self):
+        child_source = "\n".join(
+            [
+                "import importlib.util",
+                "import sys",
+                "import time",
+                "from pathlib import Path",
+                "module_path, registry_raw, ready_raw, release_raw = sys.argv[1:]",
+                "spec = importlib.util.spec_from_file_location('child_cma_audit', module_path)",
+                "module = importlib.util.module_from_spec(spec)",
+                "sys.modules[spec.name] = module",
+                "spec.loader.exec_module(module)",
+                "registry_path = Path(registry_raw)",
+                "ready_path = Path(ready_raw)",
+                "release_path = Path(release_raw)",
+                "with module.RegistryLock(registry_path):",
+                "    ready_path.write_text('locked', encoding='utf-8')",
+                "    deadline = time.monotonic() + 10",
+                "    while not release_path.exists():",
+                "        if time.monotonic() >= deadline:",
+                "            raise RuntimeError('parent did not release child lock')",
+                "        time.sleep(0.01)",
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry_path = root / "registry.json"
+            ready_path = root / "ready"
+            release_path = root / "release"
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    child_source,
+                    str(MODULE_PATH),
+                    str(registry_path),
+                    str(ready_path),
+                    str(release_path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                deadline = time.monotonic() + 5
+                while not ready_path.exists() and process.poll() is None:
+                    if time.monotonic() >= deadline:
+                        self.fail("child did not acquire the registry lock")
+                    time.sleep(0.01)
+                if process.poll() is not None:
+                    stdout, stderr = process.communicate()
+                    self.fail(
+                        f"child failed before holding the lock: {stdout} {stderr}"
+                    )
+
+                with self.assertRaisesRegex(
+                    audit.ConfigurationError, "exclusive registry lock"
+                ):
+                    with audit.RegistryLock(registry_path):
+                        self.fail("a second process acquired the registry lock")
+
+                release_path.write_text("release", encoding="utf-8")
+                stdout, stderr = process.communicate(timeout=5)
+                self.assertEqual(0, process.returncode, stdout + stderr)
+                with audit.RegistryLock(registry_path):
+                    pass
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
+
+
+class SyncReceiptTests(unittest.TestCase):
+    CYCLE_ID = "audit-" + "a" * 32
+
+    def validate(self, response, mode):
+        return audit.validate_sync_response(
+            response,
+            notification_mode=mode,
+            cycle_id=self.CYCLE_ID,
+            plex_user_id="42",
+        )
+
+    def test_accepts_exact_suppress_and_permit_receipts(self):
+        safe = sync_receipt(
+            notification_mode=audit.NOTIFICATION_MODE_SUPPRESS,
+            cycle_id=self.CYCLE_ID,
+            plex_user_id="42",
+            result="planned",
+        )
+        self.assertIs(safe, self.validate(safe, audit.NOTIFICATION_MODE_SUPPRESS))
+
+        deferred = deferred_receipt(
+            cycle_id=self.CYCLE_ID,
+            plex_user_id="42",
+            planned_action="notice-started",
+        )
+        self.assertIs(
+            deferred,
+            self.validate(deferred, audit.NOTIFICATION_MODE_SUPPRESS),
+        )
+
+        permitted = sync_receipt(
+            notification_mode=audit.NOTIFICATION_MODE_PERMIT,
+            cycle_id=self.CYCLE_ID,
+            plex_user_id="42",
+            planned_action="notice-started",
+            permit_required=True,
+            permit_reserved=True,
+            budget_remaining=0,
+        )
+        self.assertIs(
+            permitted,
+            self.validate(permitted, audit.NOTIFICATION_MODE_PERMIT),
+        )
+
+    def test_accepts_staged_ticket_creation_and_ranks_existing_notice_first(self):
+        planned_action = audit.TICKET_CREATED_AWAITING_NOTICE_ACTION
+        deferred = deferred_receipt(
+            cycle_id=self.CYCLE_ID,
+            plex_user_id="42",
+            planned_action=planned_action,
+        )
+        self.assertIs(
+            deferred,
+            self.validate(deferred, audit.NOTIFICATION_MODE_SUPPRESS),
+        )
+
+        created = sync_receipt(
+            notification_mode=audit.NOTIFICATION_MODE_PERMIT,
+            cycle_id=self.CYCLE_ID,
+            plex_user_id="42",
+            planned_action=planned_action,
+            permit_required=True,
+            permit_reserved=True,
+            budget_remaining=0,
+            result="created",
+        )
+        self.assertIs(
+            created,
+            self.validate(created, audit.NOTIFICATION_MODE_PERMIT),
+        )
+        self.assertLess(
+            audit.candidate_priority({"plannedAction": "notice-started"}),
+            audit.candidate_priority({"plannedAction": planned_action}),
+        )
+
+    def test_rejects_missing_mismatched_and_contradictory_receipts(self):
+        valid = sync_receipt(
+            notification_mode=audit.NOTIFICATION_MODE_SUPPRESS,
+            cycle_id=self.CYCLE_ID,
+            plex_user_id="42",
+            result="planned",
+        )
+        corruptions = [
+            lambda value: value.pop("notificationPolicyVersion"),
+            lambda value: value.__setitem__("notificationPolicyVersion", True),
+            lambda value: value.__setitem__("notificationPolicyVersion", 1.0),
+            lambda value: value.__setitem__("notificationMode", "permit"),
+            lambda value: value.__setitem__("cycleId", "audit-" + "b" * 32),
+            lambda value: value.__setitem__("plexUserId", "other"),
+            lambda value: value.__setitem__(
+                "memberNotificationPermitRequired", "true"
+            ),
+            lambda value: value.__setitem__(
+                "memberNotificationPermitReserved", 0
+            ),
+            lambda value: value.__setitem__(
+                "memberNotificationBudgetRemaining", True
+            ),
+            lambda value: value.__setitem__(
+                "memberNotificationBudgetRemaining", 2
+            ),
+            lambda value: value.__setitem__("plannedAction", "unknown"),
+        ]
+        for index, corrupt in enumerate(corruptions):
+            with self.subTest(index=index):
+                response = dict(valid)
+                corrupt(response)
+                with self.assertRaises(audit.RemoteApiError):
+                    self.validate(response, audit.NOTIFICATION_MODE_SUPPRESS)
+
+        contradictory_suppress = deferred_receipt(
+            cycle_id=self.CYCLE_ID,
+            plex_user_id="42",
+            planned_action="notice-started",
+        )
+        contradictory_suppress["memberNotificationPermitReserved"] = True
+        with self.assertRaises(audit.RemoteApiError):
+            self.validate(
+                contradictory_suppress,
+                audit.NOTIFICATION_MODE_SUPPRESS,
+            )
+
+        contradictory_permit = sync_receipt(
+            notification_mode=audit.NOTIFICATION_MODE_PERMIT,
+            cycle_id=self.CYCLE_ID,
+            plex_user_id="42",
+            planned_action="notice-started",
+            permit_required=True,
+            permit_reserved=True,
+            budget_remaining=1,
+        )
+        with self.assertRaises(audit.RemoteApiError):
+            self.validate(contradictory_permit, audit.NOTIFICATION_MODE_PERMIT)
+
+        mutating_suppress_receipt = sync_receipt(
+            notification_mode=audit.NOTIFICATION_MODE_SUPPRESS,
+            cycle_id=self.CYCLE_ID,
+            plex_user_id="42",
+            result="updated",
+        )
+        with self.assertRaises(audit.RemoteApiError):
+            self.validate(
+                mutating_suppress_receipt,
+                audit.NOTIFICATION_MODE_SUPPRESS,
+            )
+
+
+class ProtocolReceiptTests(unittest.TestCase):
+    def test_accepts_only_the_exact_closed_protocol_receipt(self):
+        valid = protocol_receipt()
+        self.assertIs(valid, audit.validate_protocol_response(valid))
+
+        corruptions = [
+            lambda value: value.pop("notificationPolicyVersion"),
+            lambda value: value.__setitem__("unexpected", True),
+            lambda value: value.__setitem__("appName", "legacy-account-audit"),
+            lambda value: value.__setitem__("notificationPolicyVersion", True),
+            lambda value: value.__setitem__("notificationPolicyVersion", 1.0),
+            lambda value: value.__setitem__("notificationModes", ["permit", "suppress"]),
+            lambda value: value.__setitem__("memberNotificationLimit", True),
+            lambda value: value.__setitem__("memberNotificationLimit", 2),
+            lambda value: value.__setitem__("memberNotificationWindowSeconds", 1.0),
+            lambda value: value.__setitem__("memberNotificationWindowSeconds", 3600),
+        ]
+        for index, corrupt in enumerate(corruptions):
+            with self.subTest(index=index):
+                response = protocol_receipt()
+                corrupt(response)
+                with self.assertRaises(audit.RemoteApiError):
+                    audit.validate_protocol_response(response)
+
+    def test_client_uses_the_read_only_sibling_endpoint(self):
+        class RecordingHttp:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, url, **kwargs):
+                self.calls.append((url, kwargs))
+                return protocol_receipt()
+
+        http = RecordingHttp()
+        client = audit.YouTrackClient(config(Path("registry.json")), http)
+        response = client.protocol()
+
+        self.assertEqual(protocol_receipt(), response)
+        self.assertEqual(1, len(http.calls))
+        self.assertEqual(
+            "https://youtrack.example.invalid/api/admin/projects/CMA/"
+            "extensionEndpoints/cma-account-audit/account-sync/protocol",
+            http.calls[0][0],
+        )
+        self.assertEqual(
+            {"Authorization": "Bearer test"},
+            http.calls[0][1]["headers"],
+        )
+        self.assertNotIn("body", http.calls[0][1])
+        self.assertNotIn("method", http.calls[0][1])
+
+
+class RunOnceTests(unittest.TestCase):
+    def run_worker(
+        self,
+        *,
+        accounts,
+        registry_path,
+        responder=None,
+        observed_at=NOW,
+        clock_at=None,
+        dry_run=False,
+        protocol_response=None,
+    ):
+        calls = []
+        clock_at = clock_at or observed_at
+
+        class StubTautulliClient:
+            def __init__(self, _config, _http):
+                pass
+
+            def accounts(self):
+                return list(accounts)
+
+        class StubYouTrackClient:
+            def __init__(self, _config, _http):
+                pass
+
+            def protocol(self):
+                if dry_run:
+                    raise AssertionError("Dry-run must not call the protocol endpoint")
+                if isinstance(protocol_response, BaseException):
+                    raise protocol_response
+                return protocol_receipt() if protocol_response is None else protocol_response
+
+            def sync(
+                self,
+                target,
+                decision,
+                *,
+                notification_mode,
+                cycle_id,
+            ):
+                calls.append(
+                    {
+                        "account": target,
+                        "decision": decision,
+                        "notification_mode": notification_mode,
+                        "cycle_id": cycle_id,
+                    }
+                )
+                if responder is None:
+                    raise AssertionError("YouTrack must not be called")
+                return responder(target, decision, notification_mode, cycle_id)
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(audit, "TautulliClient", StubTautulliClient),
+            mock.patch.object(audit, "YouTrackClient", StubYouTrackClient),
+            mock.patch.object(audit, "utc_now", return_value=clock_at),
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+        ):
+            exit_code = audit.run_once(
+                config(registry_path, dry_run=dry_run),
+                observed_at=observed_at,
+            )
+        return exit_code, calls, stdout.getvalue(), stderr.getvalue()
+
+    @staticmethod
+    def inactive_account(*, username, user_id):
+        return account(
+            username=username,
+            user_id=user_id,
+            last_streamed=NOW - timedelta(days=60),
+        )
+
+    def test_dry_run_never_calls_youtrack_or_reserves_a_permit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            exit_code, calls, _, _ = self.run_worker(
+                accounts=[self.inactive_account(username="member", user_id="42")],
+                registry_path=path,
+                dry_run=True,
+            )
+
+            self.assertEqual(0, exit_code)
+            self.assertEqual([], calls)
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(NOW.isoformat(), saved["lastCompletedAt"])
+            self.assertNotIn("memberNotificationGate", saved)
+
+    def test_legacy_or_invalid_protocol_stops_before_account_enumeration(self):
+        class MustNotEnumerate:
+            def __iter__(self):
+                raise AssertionError("Tautulli accounts were enumerated before the handshake")
+
+        unsafe_responses = [
+            audit.RemoteApiError("GET protocol returned HTTP 404"),
+            {"result": "legacy-account-sync"},
+            protocol_receipt(memberNotificationLimit=2),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            for index, unsafe in enumerate(unsafe_responses):
+                with self.subTest(index=index):
+                    path = Path(directory) / f"registry-{index}.json"
+                    original = {
+                        "schemaVersion": 1,
+                        "users": {},
+                        "memberNotificationPermitHistory": {},
+                        "lastCompletedAt": (NOW - timedelta(days=1)).isoformat(),
+                    }
+                    path.write_text(json.dumps(original), encoding="utf-8")
+                    with self.assertRaises(audit.RemoteApiError):
+                        self.run_worker(
+                            accounts=MustNotEnumerate(),
+                            registry_path=path,
+                            responder=lambda *_args: (_ for _ in ()).throw(
+                                AssertionError("sync POST was called before the handshake")
+                            ),
+                            protocol_response=unsafe,
+                        )
+                    self.assertEqual(
+                        original,
+                        json.loads(path.read_text(encoding="utf-8")),
+                    )
+                    self.assertFalse(
+                        path.with_name(path.name + ".lock").exists(),
+                        "the registry lock was acquired before protocol validation",
+                    )
+
+    def test_held_registry_lock_stops_before_inventory_or_sync(self):
+        class MustNotEnumerate:
+            def __iter__(self):
+                raise AssertionError("Tautulli accounts were enumerated while locked")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            original = {
+                "schemaVersion": 1,
+                "users": {},
+                "memberNotificationPermitHistory": {},
+                "lastCompletedAt": (NOW - timedelta(days=1)).isoformat(),
+            }
+            path.write_text(json.dumps(original), encoding="utf-8")
+
+            with audit.RegistryLock(path):
+                with self.assertRaisesRegex(
+                    audit.ConfigurationError, "exclusive registry lock"
+                ):
+                    self.run_worker(
+                        accounts=MustNotEnumerate(),
+                        registry_path=path,
+                        responder=lambda *_args: (_ for _ in ()).throw(
+                            AssertionError("sync POST was called while locked")
+                        ),
+                    )
+
+            self.assertEqual(
+                original,
+                json.loads(path.read_text(encoding="utf-8")),
+            )
+
+    def test_three_candidates_issue_only_one_permit_post(self):
+        candidates = [
+            self.inactive_account(username="zeta", user_id="3"),
+            self.inactive_account(username="alpha", user_id="1"),
+            self.inactive_account(username="beta", user_id="2"),
+        ]
+        planned_actions = {
+            "1": "review-already-in-progress",
+            "2": "retained",
+            "3": "notice-started",
+        }
+
+        def responder(target, _decision, mode, cycle_id):
+            planned_action = planned_actions[target.user_id]
+            if mode == audit.NOTIFICATION_MODE_SUPPRESS:
+                return deferred_receipt(
+                    cycle_id=cycle_id,
+                    plex_user_id=target.user_id,
+                    planned_action=planned_action,
+                )
+            return sync_receipt(
+                notification_mode=audit.NOTIFICATION_MODE_PERMIT,
+                cycle_id=cycle_id,
+                plex_user_id=target.user_id,
+                planned_action=planned_action,
+                permit_required=True,
+                permit_reserved=True,
+                budget_remaining=0,
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            exit_code, calls, _, _ = self.run_worker(
+                accounts=candidates,
+                registry_path=path,
+                responder=responder,
+            )
+
+            self.assertEqual(0, exit_code)
+            self.assertEqual(
+                ["suppress", "suppress", "suppress", "permit"],
+                [item["notification_mode"] for item in calls],
+            )
+            permit_calls = [
+                item
+                for item in calls
+                if item["notification_mode"] == audit.NOTIFICATION_MODE_PERMIT
+            ]
+            self.assertEqual(1, len(permit_calls))
+            # A direct Access Retained transition wins over an in-progress pulse.
+            self.assertEqual("2", permit_calls[0]["account"].user_id)
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual("confirmed", saved["memberNotificationGate"]["status"])
+            self.assertEqual("2", saved["memberNotificationGate"]["plexUserId"])
+            self.assertEqual(NOW.isoformat(), saved["lastCompletedAt"])
+
+    def test_read_only_plan_is_not_selected_over_a_notification_candidate(self):
+        accounts = [
+            self.inactive_account(username="safe", user_id="1"),
+            self.inactive_account(username="candidate", user_id="2"),
+        ]
+
+        def responder(target, _decision, mode, cycle_id):
+            if mode == audit.NOTIFICATION_MODE_SUPPRESS:
+                if target.user_id == "1":
+                    return sync_receipt(
+                        notification_mode=mode,
+                        cycle_id=cycle_id,
+                        plex_user_id=target.user_id,
+                        planned_action="facts-only",
+                        permit_required=False,
+                        result="planned",
+                    )
+                return deferred_receipt(
+                    cycle_id=cycle_id,
+                    plex_user_id=target.user_id,
+                    planned_action="notice-started",
+                )
+            self.assertEqual("2", target.user_id)
+            return sync_receipt(
+                notification_mode=mode,
+                cycle_id=cycle_id,
+                plex_user_id=target.user_id,
+                planned_action="notice-started",
+                permit_required=True,
+                permit_reserved=True,
+                budget_remaining=0,
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            exit_code, calls, _, _ = self.run_worker(
+                accounts=accounts,
+                registry_path=Path(directory) / "registry.json",
+                responder=responder,
+            )
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual(
+            ["suppress", "suppress", "permit"],
+            [item["notification_mode"] for item in calls],
+        )
+        self.assertEqual("2", calls[-1]["account"].user_id)
+
+    def test_local_window_starts_at_the_outbound_permit_attempt(self):
+        target = self.inactive_account(username="alpha", user_id="1")
+
+        def responder(target, _decision, mode, cycle_id):
+            if mode == audit.NOTIFICATION_MODE_SUPPRESS:
+                return deferred_receipt(
+                    cycle_id=cycle_id,
+                    plex_user_id=target.user_id,
+                    planned_action="notice-started",
+                )
+            return sync_receipt(
+                notification_mode=audit.NOTIFICATION_MODE_PERMIT,
+                cycle_id=cycle_id,
+                plex_user_id=target.user_id,
+                planned_action="notice-started",
+                permit_required=True,
+                permit_reserved=True,
+                budget_remaining=0,
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            permit_at = NOW + timedelta(hours=2)
+            exit_code, _, _, _ = self.run_worker(
+                accounts=[target],
+                registry_path=path,
+                responder=responder,
+                observed_at=NOW,
+                clock_at=permit_at,
+            )
+            self.assertEqual(0, exit_code)
+            registry = audit.Registry(path)
+            registry.load()
+            self.assertEqual(
+                permit_at.isoformat(),
+                registry.data["memberNotificationGate"]["reservedAt"],
+            )
+            self.assertFalse(
+                registry.notification_permit_available(NOW + timedelta(hours=25))
+            )
+            self.assertTrue(
+                registry.notification_permit_available(NOW + timedelta(hours=26))
+            )
+
+    def test_any_suppress_error_blocks_permit_and_last_completed_update(self):
+        candidates = [
+            self.inactive_account(username="alpha", user_id="1"),
+            self.inactive_account(username="beta", user_id="2"),
+        ]
+        old_completed = (NOW - timedelta(days=1)).isoformat()
+
+        def responder(target, _decision, mode, cycle_id):
+            self.assertEqual(audit.NOTIFICATION_MODE_SUPPRESS, mode)
+            if target.user_id == "2":
+                raise audit.RemoteApiError("suppression failed")
+            return deferred_receipt(
+                cycle_id=cycle_id,
+                plex_user_id=target.user_id,
+                planned_action="notice-started",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "users": {},
+                        "memberNotificationPermitHistory": {},
+                        "lastCompletedAt": old_completed,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            exit_code, calls, _, stderr = self.run_worker(
+                accounts=candidates,
+                registry_path=path,
+                responder=responder,
+            )
+
+            self.assertEqual(1, exit_code)
+            self.assertEqual(
+                ["suppress", "suppress"],
+                [item["notification_mode"] for item in calls],
+            )
+            self.assertIn('"phase": "suppress"', stderr)
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(old_completed, saved["lastCompletedAt"])
+            self.assertNotIn("memberNotificationGate", saved)
+
+    def test_ambiguous_permit_failure_stays_reserved_and_is_not_retried(self):
+        target = self.inactive_account(username="alpha", user_id="1")
+
+        def failing_responder(target, _decision, mode, cycle_id):
+            if mode == audit.NOTIFICATION_MODE_SUPPRESS:
+                return deferred_receipt(
+                    cycle_id=cycle_id,
+                    plex_user_id=target.user_id,
+                    planned_action="notice-started",
+                )
+            raise audit.RemoteApiError("response timed out")
+
+        def safe_responder(target, _decision, mode, cycle_id):
+            self.assertEqual(audit.NOTIFICATION_MODE_SUPPRESS, mode)
+            return deferred_receipt(
+                cycle_id=cycle_id,
+                plex_user_id=target.user_id,
+                planned_action="notice-started",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            first_code, first_calls, _, _ = self.run_worker(
+                accounts=[target],
+                registry_path=path,
+                responder=failing_responder,
+            )
+            self.assertEqual(1, first_code)
+            self.assertEqual(
+                ["suppress", "permit"],
+                [item["notification_mode"] for item in first_calls],
+            )
+            after_failure = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                "reserved", after_failure["memberNotificationGate"]["status"]
+            )
+            self.assertNotIn("lastCompletedAt", after_failure)
+
+            second_code, second_calls, _, _ = self.run_worker(
+                accounts=[target],
+                registry_path=path,
+                responder=safe_responder,
+                observed_at=NOW + timedelta(hours=1),
+            )
+            self.assertEqual(0, second_code)
+            self.assertEqual(
+                ["suppress"],
+                [item["notification_mode"] for item in second_calls],
+            )
+
+    def test_determinate_deferred_permit_receipts_complete_safely(self):
+        target = self.inactive_account(username="alpha", user_id="1")
+        scenarios = [
+            {
+                "name": "server-budget-exhausted",
+                "response": lambda cycle_id: sync_receipt(
+                    notification_mode=audit.NOTIFICATION_MODE_PERMIT,
+                    cycle_id=cycle_id,
+                    plex_user_id="1",
+                    planned_action="notice-started",
+                    permit_required=True,
+                    budget_remaining=0,
+                    result="deferred",
+                    action=audit.NOTIFICATION_BUDGET_EXHAUSTED_ACTION,
+                ),
+                "status": "server-budget-exhausted",
+            },
+            {
+                "name": "no-longer-required",
+                "response": lambda cycle_id: sync_receipt(
+                    notification_mode=audit.NOTIFICATION_MODE_PERMIT,
+                    cycle_id=cycle_id,
+                    plex_user_id="1",
+                    planned_action="facts-only",
+                    permit_required=False,
+                    result="planned",
+                ),
+                "status": "no-longer-required",
+            },
+        ]
+
+        for scenario in scenarios:
+            with self.subTest(scenario=scenario["name"]):
+                def responder(target, _decision, mode, cycle_id):
+                    if mode == audit.NOTIFICATION_MODE_SUPPRESS:
+                        return deferred_receipt(
+                            cycle_id=cycle_id,
+                            plex_user_id=target.user_id,
+                            planned_action="notice-started",
+                        )
+                    return scenario["response"](cycle_id)
+
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "registry.json"
+                    exit_code, calls, _, _ = self.run_worker(
+                        accounts=[target],
+                        registry_path=path,
+                        responder=responder,
+                    )
+                    self.assertEqual(0, exit_code)
+                    self.assertEqual(
+                        ["suppress", "permit"],
+                        [item["notification_mode"] for item in calls],
+                    )
+                    saved = json.loads(path.read_text(encoding="utf-8"))
+                    self.assertEqual(
+                        scenario["status"],
+                        saved["memberNotificationGate"]["status"],
+                    )
+                    self.assertEqual(NOW.isoformat(), saved["lastCompletedAt"])
+
+    def test_invalid_permit_receipt_remains_ambiguously_reserved(self):
+        target = self.inactive_account(username="alpha", user_id="1")
+
+        def responder(target, _decision, mode, cycle_id):
+            if mode == audit.NOTIFICATION_MODE_SUPPRESS:
+                return deferred_receipt(
+                    cycle_id=cycle_id,
+                    plex_user_id=target.user_id,
+                    planned_action="notice-started",
+                )
+            invalid = sync_receipt(
+                notification_mode=audit.NOTIFICATION_MODE_PERMIT,
+                cycle_id=cycle_id,
+                plex_user_id=target.user_id,
+                planned_action="notice-started",
+                permit_required=True,
+                permit_reserved=True,
+                budget_remaining=0,
+            )
+            invalid["cycleId"] = "audit-" + "f" * 32
+            return invalid
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            exit_code, _, _, stderr = self.run_worker(
+                accounts=[target],
+                registry_path=path,
+                responder=responder,
+            )
+            self.assertEqual(1, exit_code)
+            self.assertIn("wrong cycle ID", stderr)
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                "reserved", saved["memberNotificationGate"]["status"]
+            )
+            self.assertNotIn("lastCompletedAt", saved)
+
+    def test_least_recently_permitted_candidate_rotates_after_window(self):
+        candidates = [
+            self.inactive_account(username="alpha", user_id="1"),
+            self.inactive_account(username="beta", user_id="2"),
+        ]
+
+        def responder(target, _decision, mode, cycle_id):
+            if mode == audit.NOTIFICATION_MODE_SUPPRESS:
+                return deferred_receipt(
+                    cycle_id=cycle_id,
+                    plex_user_id=target.user_id,
+                    planned_action="review-already-in-progress",
+                )
+            return sync_receipt(
+                notification_mode=audit.NOTIFICATION_MODE_PERMIT,
+                cycle_id=cycle_id,
+                plex_user_id=target.user_id,
+                planned_action="review-already-in-progress",
+                permit_required=True,
+                permit_reserved=True,
+                budget_remaining=0,
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            first_code, first_calls, _, _ = self.run_worker(
+                accounts=candidates,
+                registry_path=path,
+                responder=responder,
+            )
+            second_code, second_calls, _, _ = self.run_worker(
+                accounts=candidates,
+                registry_path=path,
+                responder=responder,
+                observed_at=NOW + timedelta(hours=24),
+            )
+
+            self.assertEqual(0, first_code)
+            self.assertEqual(0, second_code)
+            first_selected = [
+                item["account"].user_id
+                for item in first_calls
+                if item["notification_mode"] == audit.NOTIFICATION_MODE_PERMIT
+            ]
+            second_selected = [
+                item["account"].user_id
+                for item in second_calls
+                if item["notification_mode"] == audit.NOTIFICATION_MODE_PERMIT
+            ]
+            self.assertEqual(["1"], first_selected)
+            self.assertEqual(["2"], second_selected)
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                {"1", "2"},
+                set(saved["memberNotificationPermitHistory"]),
+            )
+
+    def test_invalid_per_user_permit_history_fails_closed(self):
+        invalid_histories = [
+            [],
+            {"": NOW.isoformat()},
+            {"42": "not-a-timestamp"},
+            {"42": NOW.replace(tzinfo=None).isoformat()},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            for index, history in enumerate(invalid_histories):
+                with self.subTest(index=index):
+                    path = Path(directory) / f"registry-{index}.json"
+                    path.write_text(
+                        json.dumps(
+                            {
+                                "schemaVersion": 1,
+                                "users": {},
+                                "memberNotificationPermitHistory": history,
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    with self.assertRaises(audit.ConfigurationError):
+                        audit.Registry(path).load()
 
 
 if __name__ == "__main__":
