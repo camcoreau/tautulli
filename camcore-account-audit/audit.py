@@ -933,7 +933,6 @@ def _run_once_locked(
         )
         return 0
 
-    permit_available = registry.notification_permit_available(observed_at)
     candidates: list[dict[str, Any]] = []
     for entry in entries:
         account = entry["account"]
@@ -973,6 +972,13 @@ def _run_once_locked(
     permit_status = "not-needed"
     if candidates:
         permit_status = "deferred"
+    # A daily scheduler can start the next cycle before 24 hours have elapsed
+    # from the previous cycle's later outbound permit. Recheck against the
+    # actual permit-attempt clock after suppression so a safe candidate is not
+    # unnecessarily deferred until the following day. Keep observed_at fixed
+    # for account classification and fail safely if the clock moves backwards.
+    permit_attempt_at = max(observed_at.astimezone(UTC), utc_now())
+    permit_available = registry.notification_permit_available(permit_attempt_at)
     if errors == 0 and candidates and permit_available:
         selected = min(
             candidates,
@@ -984,14 +990,10 @@ def _run_once_locked(
             ),
         )
         selected_account = selected["account"]
-        # Start the rolling window at the actual outbound permit attempt, not at
-        # the earlier inventory-observation timestamp. max() also fails safely
-        # when the local clock moves backwards during a cycle.
-        permit_reserved_at = max(observed_at.astimezone(UTC), utc_now())
         registry.reserve_notification_permit(
             cycle_id=cycle_id,
             account=selected_account,
-            observed_at=permit_reserved_at,
+            observed_at=permit_attempt_at,
         )
         permit_status = "reserved"
         try:
