@@ -96,8 +96,8 @@ auth_path.write_text(auth, encoding="utf-8")
 # CamCore logo, then transform the default Tautulli email into a polished
 # Cameron-Media weekly update.
 public_dark_logo = "https://raw.githubusercontent.com/camcoreau/tautulli/master/camcore-branding/generated/camcore-logo-dark.png"
-brand_teal = "#0091A0"
-brand_teal_light = "#59CBD4"
+brand_teal = "#C8321A"
+brand_teal_light = "#FF6A47"
 
 newsletter_css = f'''
 

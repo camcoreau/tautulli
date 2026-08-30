@@ -1,25 +1,18 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 280" role="img" aria-labelledby="title desc">
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 320" role="img" aria-labelledby="title desc">
   <title id="title">CamCore</title>
-  <desc id="desc">CamCore repository branding</desc>
-  <defs>
-    <linearGradient id="cyan" x1="0" y1="0" x2="1" y2="1">
-      <stop stop-color="#18D7F2"/>
-      <stop offset="1" stop-color="#0096C7"/>
-    </linearGradient>
-    <linearGradient id="white" x1="0" y1="0" x2="1" y2="1">
-      <stop stop-color="#FFFFFF"/>
-      <stop offset="1" stop-color="#DCEBFF"/>
-    </linearGradient>
-  </defs>
-  <rect width="1000" height="280" rx="28" fill="#050C12"/>
-  <g transform="translate(38 34) scale(.99)">
-    <path d="M105 12 190 44v48c0 21-3 40-12 58" fill="none" stroke="url(#white)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
-    <path d="M32 150c-9-18-12-37-12-58V44l85-32" fill="none" stroke="url(#white)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
-    <path d="M52 118V82l53-41 53 41v36M145 72V50h18v36" fill="none" stroke="url(#white)" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
-    <g fill="#fff"><rect x="91" y="82" width="12" height="12" rx="1.5"/><rect x="108" y="82" width="12" height="12" rx="1.5"/><rect x="91" y="99" width="12" height="12" rx="1.5"/><rect x="108" y="99" width="12" height="12" rx="1.5"/></g>
-    <path d="M40 143h130M105 143v45" fill="none" stroke="url(#cyan)" stroke-width="10" stroke-linecap="round"/>
-    <circle cx="40" cy="143" r="16" fill="#06111F" stroke="url(#cyan)" stroke-width="9"/><circle cx="170" cy="143" r="16" fill="#06111F" stroke="url(#cyan)" stroke-width="9"/><circle cx="105" cy="143" r="18" fill="url(#cyan)"/><circle cx="105" cy="188" r="16" fill="#06111F" stroke="url(#cyan)" stroke-width="9"/>
-    <path d="M57 169c14 12 29 20 48 27 19-7 34-15 48-27" fill="none" stroke="url(#white)" stroke-width="10" stroke-linecap="round"/>
+  <desc id="desc">CamCore repository branding using the connected-core identity</desc>
+  <rect width="1280" height="320" rx="28" fill="#101720"/>
+  <circle cx="1128" cy="160" r="245" fill="none" stroke="#FF4B2B" stroke-opacity=".10" stroke-width="2"/>
+  <circle cx="1128" cy="160" r="172" fill="none" stroke="#FF4B2B" stroke-opacity=".15" stroke-width="2"/>
+  <circle cx="1128" cy="160" r="99" fill="none" stroke="#FF4B2B" stroke-opacity=".23" stroke-width="2"/>
+  <path d="M0 320V238L244 320Z" fill="#FF4B2B" fill-opacity=".14"/>
+  <g transform="translate(62 48) scale(.438)">
+    <path d="M256 48 A208 208 0 1 0 256 464 A208 208 0 0 0 390 415 L338 351 A126 126 0 1 1 338 161 L390 97 A208 208 0 0 0 256 48 Z" fill="#FFFFFF"/>
+    <path d="M280 149 A132 132 0 1 1 280 413 L330 352 A55 55 0 1 0 330 210 Z" fill="#FF4B2B"/>
+    <path d="M256 198 A58 58 0 1 0 256 314 A58 58 0 0 0 256 198 Z" fill="#FF4B2B"/>
   </g>
-  <text x="270" y="177" font-family="Inter,Segoe UI,Arial,Helvetica,sans-serif" font-size="132" font-weight="700" letter-spacing="-5"><tspan fill="url(#white)">Cam</tspan><tspan fill="url(#cyan)">Core</tspan></text>
+  <text x="322" y="185" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="112" font-weight="800" letter-spacing="-6" fill="#FFFFFF">Cam<tspan fill="#FF4B2B">Core</tspan></text>
+  <text x="329" y="229" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="18" font-weight="700" letter-spacing="4.5" fill="#C7CDD5">CONNECTED TECHNOLOGY • RELIABLE CORE</text>
 </svg>
+

@@ -77,8 +77,8 @@ jobs:
             | base64 --decode \
             > camcore-branding/camcore-logo-light.png
 
-          echo "58d436201eff1ed379c8f3a1bfb818ef403fee75d188a8a6d478df65646232af  camcore-branding/camcore-logo-dark.png" | sha256sum --check
-          echo "9a8f29b247fcdfd670c58f48b7aa760e157fa8e042b8f8ffd9164c1bfa03fff0  camcore-branding/camcore-logo-light.png" | sha256sum --check
+          echo "2e8094d92fa1e1d80f013baa5c6a25960f95da2f0fd99bca9373d3268e7ccc3b  camcore-branding/camcore-logo-dark.png" | sha256sum --check
+          echo "a45ba31bff53d20d8047d2dd98198c50aa96bd85ea9f9d829431c152e8aa7f45  camcore-branding/camcore-logo-light.png" | sha256sum --check
 
       - name: Build CamCore image without publishing
         if: github.ref != 'refs/heads/master'
@@ -173,8 +173,8 @@ jobs:
             | base64 --decode \
             > camcore-branding/camcore-logo-light.png
 
-          echo "58d436201eff1ed379c8f3a1bfb818ef403fee75d188a8a6d478df65646232af  camcore-branding/camcore-logo-dark.png" | sha256sum --check
-          echo "9a8f29b247fcdfd670c58f48b7aa760e157fa8e042b8f8ffd9164c1bfa03fff0  camcore-branding/camcore-logo-light.png" | sha256sum --check
+          echo "2e8094d92fa1e1d80f013baa5c6a25960f95da2f0fd99bca9373d3268e7ccc3b  camcore-branding/camcore-logo-dark.png" | sha256sum --check
+          echo "a45ba31bff53d20d8047d2dd98198c50aa96bd85ea9f9d829431c152e8aa7f45  camcore-branding/camcore-logo-light.png" | sha256sum --check
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
