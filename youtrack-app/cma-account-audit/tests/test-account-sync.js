@@ -673,6 +673,51 @@ function testActivityAutomaticallyRetainsAnOpenReview() {
   assert.strictEqual(existing.fields['Account Audit Confirmed At'], NOW);
 }
 
+function testActivityRetainsAStagedTicketBeforeItsFirstNotice() {
+  resetRuntime();
+  const targetProject = project('CMA');
+  const existing = existingIssue(targetProject, {
+    stage: 'Active',
+    accountStatus: 'Inactive'
+  });
+  matchExisting(existing);
+
+  let ctx = context(validBody({
+    accountStatus: 'Active',
+    reviewNeeded: false,
+    notificationMode: 'suppress'
+  }), targetProject);
+  handler(ctx);
+  assert.strictEqual(ctx.response.payload.result, 'deferred');
+  assert.strictEqual(ctx.response.payload.plannedAction, 'retained');
+  assertReceipt(ctx.response.payload, {
+    mode: 'suppress',
+    required: true,
+    reserved: false,
+    remaining: 1
+  });
+  assert.strictEqual(existing.fields['Review Stage'].name, 'Active');
+  assert.strictEqual(existing.fields['Account Status'].name, 'Inactive');
+  assertNoMutation();
+
+  ctx = context(validBody({
+    accountStatus: 'Active',
+    reviewNeeded: false
+  }), targetProject);
+  handler(ctx);
+  assert.strictEqual(ctx.response.payload.result, 'updated');
+  assert.strictEqual(ctx.response.payload.action, 'retained');
+  assert.strictEqual(existing.fields['Review Stage'].name, 'Access Retained');
+  assert.strictEqual(existing.fields['Account Status'].name, 'Active');
+  assert.strictEqual(existing.fields['Account Audit Confirmed At'], NOW);
+  assertReceipt(ctx.response.payload, {
+    mode: 'permit',
+    required: true,
+    reserved: true,
+    remaining: 0
+  });
+}
+
 function testRetainedReviewNeedsANewActiveBaselineBeforeRestart() {
   resetRuntime();
   const targetProject = project('CMA');
@@ -980,6 +1025,7 @@ try {
   testMutationExceptionEscapesAndCannotStampSuccess();
   testRepeatedDailySyncDoesNotRestartAnOpenReview();
   testActivityAutomaticallyRetainsAnOpenReview();
+  testActivityRetainsAStagedTicketBeforeItsFirstNotice();
   testRetainedReviewNeedsANewActiveBaselineBeforeRestart();
   testPermitModeNonCandidateIsCompletelyReadOnly();
   testSuppressDefersNewCandidateWithoutAnyMutation();
