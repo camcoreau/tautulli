@@ -2,8 +2,8 @@ from pathlib import Path
 import re
 
 
-BRAND_TEAL = "#0091A0"
-BRAND_TEAL_LIGHT = "#59CBD4"
+BRAND_TEAL = "#C8321A"
+BRAND_TEAL_LIGHT = "#FF6A47"
 
 STREAMING_CSS = f'''
 
