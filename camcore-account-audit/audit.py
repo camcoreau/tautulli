@@ -65,6 +65,15 @@ class RemoteApiError(RuntimeError):
     """Raised when Tautulli or YouTrack rejects a request."""
 
 
+class RemoteHttpError(RemoteApiError):
+    """A remote dependency returned a structured HTTP error response."""
+
+    def __init__(self, message: str, *, status_code: int, detail: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.detail = detail
+
+
 def utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -217,8 +226,10 @@ class JsonHttpClient:
                 payload = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:500]
-            raise RemoteApiError(
-                f"{method} {display_url} returned HTTP {exc.code}: {detail}"
+            raise RemoteHttpError(
+                f"{method} {display_url} returned HTTP {exc.code}: {detail}",
+                status_code=exc.code,
+                detail=detail,
             ) from exc
         except urllib.error.URLError as exc:
             raise RemoteApiError(f"{method} {display_url} failed: {exc.reason}") from exc
@@ -323,12 +334,37 @@ class YouTrackClient:
             "notificationMode": notification_mode,
             "cycleId": cycle_id,
         }
-        return self.http.request(
-            self.config.youtrack_sync_url,
-            method="POST",
-            headers={"Authorization": f"Bearer {self.config.youtrack_token}"},
-            body=payload,
-        )
+        def submit() -> Any:
+            return self.http.request(
+                self.config.youtrack_sync_url,
+                method="POST",
+                headers={"Authorization": f"Bearer {self.config.youtrack_token}"},
+                body=payload,
+            )
+
+        try:
+            return submit()
+        except RemoteHttpError as exc:
+            # Two permit transactions can both preflight the same available
+            # AppGlobalStorage budget before YouTrack commits one and rejects
+            # the loser with its structured optimistic-conflict response. The
+            # committed transaction has already consumed the global 24-hour
+            # allowance, so one same-payload retry can only receive the
+            # determinate budget-exhausted receipt (or perform the sole allowed
+            # notification if the first transaction never committed).
+            try:
+                error_payload = json.loads(exc.detail)
+            except json.JSONDecodeError:
+                error_payload = None
+            is_transaction_conflict = (
+                notification_mode == NOTIFICATION_MODE_PERMIT
+                and exc.status_code == 400
+                and isinstance(error_payload, dict)
+                and error_payload.get("error") == "Invalid properties"
+            )
+            if not is_transaction_conflict:
+                raise
+            return submit()
 
 
 class RegistryLock:

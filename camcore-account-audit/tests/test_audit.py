@@ -145,6 +145,71 @@ class JsonHttpClientTests(unittest.TestCase):
                 client.request("https://youtrack.example.invalid/protocol")
 
 
+class YouTrackClientTests(unittest.TestCase):
+    class RecordingHttp:
+        def __init__(self, failures):
+            self.failures = list(failures)
+            self.calls = []
+
+        def request(self, url, **kwargs):
+            self.calls.append((url, kwargs))
+            if self.failures:
+                raise self.failures.pop(0)
+            return {"result": "deferred"}
+
+    @staticmethod
+    def conflict():
+        return audit.RemoteHttpError(
+            'POST sync-account returned HTTP 400: {"error":"Invalid properties"}',
+            status_code=400,
+            detail='{"error":"Invalid properties"}',
+        )
+
+    def sync(self, http, notification_mode):
+        return audit.YouTrackClient(config(Path("registry.json")), http).sync(
+            account(last_streamed=NOW - timedelta(days=60)),
+            audit.Decision("Inactive", True, "inactive"),
+            notification_mode=notification_mode,
+            cycle_id="audit-00000000000000000000000000000001",
+        )
+
+    def test_permit_retries_one_structured_youtrack_transaction_conflict(self):
+        http = self.RecordingHttp([self.conflict()])
+
+        self.assertEqual(
+            {"result": "deferred"},
+            self.sync(http, audit.NOTIFICATION_MODE_PERMIT),
+        )
+        self.assertEqual(2, len(http.calls))
+        self.assertEqual(http.calls[0], http.calls[1])
+
+    def test_suppress_never_retries_a_transaction_conflict(self):
+        http = self.RecordingHttp([self.conflict()])
+
+        with self.assertRaises(audit.RemoteHttpError):
+            self.sync(http, audit.NOTIFICATION_MODE_SUPPRESS)
+        self.assertEqual(1, len(http.calls))
+
+    def test_permit_does_not_retry_other_http_400_responses(self):
+        error = audit.RemoteHttpError(
+            'POST sync-account returned HTTP 400: {"error":"Bad Request"}',
+            status_code=400,
+            detail='{"error":"Bad Request"}',
+        )
+        http = self.RecordingHttp([error])
+
+        with self.assertRaises(audit.RemoteHttpError):
+            self.sync(http, audit.NOTIFICATION_MODE_PERMIT)
+        self.assertEqual(1, len(http.calls))
+
+    def test_permit_retries_a_transaction_conflict_only_once(self):
+        http = self.RecordingHttp([self.conflict(), self.conflict()])
+
+        with self.assertRaises(audit.RemoteHttpError):
+            self.sync(http, audit.NOTIFICATION_MODE_PERMIT)
+        self.assertEqual(2, len(http.calls))
+
+
 class ClassificationTests(unittest.TestCase):
     def test_active_inside_sixty_day_window(self):
         result = audit.classify_account(
