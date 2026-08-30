@@ -2,6 +2,8 @@ const assert = require('assert');
 const Module = require('module');
 
 const NOW = 1_800_000_000_000;
+const DAY = 24 * 60 * 60 * 1000;
+const DEFAULT_CYCLE_ID = 'audit-00000000000000000000000000000001';
 const MEMBER = {id: 'user-1', login: 'member'};
 const OTHER_MEMBER = {id: 'user-2', login: 'other-member'};
 
@@ -11,6 +13,10 @@ const runtime = {
   created: [],
   searchCalls: [],
   mutations: [],
+  globalMutations: [],
+  effects: [],
+  globalStorage: null,
+  now: NOW,
   failOnField: null
 };
 
@@ -18,6 +24,7 @@ function trackedFields(issueId, initial) {
   return new Proxy(Object.assign({}, initial || {}), {
     set: function(target, fieldName, value) {
       runtime.mutations.push({issueId: issueId, fieldName: String(fieldName), value: value});
+      runtime.effects.push({type: 'issue', fieldName: String(fieldName)});
       if (runtime.failOnField === fieldName) {
         throw new Error('simulated mutation failure for ' + fieldName);
       }
@@ -27,8 +34,20 @@ function trackedFields(issueId, initial) {
   });
 }
 
+function trackedGlobalStorage(initial) {
+  return new Proxy(Object.assign({}, initial || {}), {
+    set: function(target, propertyName, value) {
+      runtime.globalMutations.push({propertyName: String(propertyName), value: value});
+      runtime.effects.push({type: 'global', propertyName: String(propertyName)});
+      target[propertyName] = value;
+      return true;
+    }
+  });
+}
+
 function MockIssue(reporter, project, summary) {
   const issueId = 'CMA-NEW-' + (runtime.created.length + 1);
+  runtime.effects.push({type: 'issue-create', issueId: issueId});
   const issue = {
     id: issueId,
     reporter: reporter,
@@ -74,7 +93,17 @@ Module._load = function(request, parent, isMain) {
   return originalLoad(request, parent, isMain);
 };
 
-const handler = require('../account-sync').httpHandler.endpoints[0].handle;
+const endpointDefinitions = require('../account-sync').httpHandler.endpoints;
+const syncEndpoint = endpointDefinitions.find(function(endpoint) {
+  return endpoint.path === 'sync-account' && endpoint.method === 'POST';
+});
+const protocolEndpoint = endpointDefinitions.find(function(endpoint) {
+  return endpoint.path === 'protocol' && endpoint.method === 'GET';
+});
+assert.ok(syncEndpoint, 'sync-account POST endpoint is missing');
+assert.ok(protocolEndpoint, 'protocol GET endpoint is missing');
+const handler = syncEndpoint.handle;
+const protocolHandler = protocolEndpoint.handle;
 Module._load = originalLoad;
 
 const bundles = {
@@ -106,7 +135,19 @@ function resetRuntime() {
   runtime.created = [];
   runtime.searchCalls = [];
   runtime.mutations = [];
+  runtime.globalMutations = [];
+  runtime.effects = [];
+  runtime.globalStorage = trackedGlobalStorage();
+  runtime.now = NOW;
   runtime.failOnField = null;
+}
+
+function seedGlobalBudget(reservedAt) {
+  runtime.globalStorage.cmaMemberNotificationReservedAt = reservedAt;
+  runtime.globalStorage.cmaMemberNotificationCycleId = DEFAULT_CYCLE_ID;
+  runtime.globalStorage.cmaMemberNotificationPlexUserId = 'plex-previous';
+  runtime.globalMutations = [];
+  runtime.effects = [];
 }
 
 function project(shortName, options) {
@@ -153,7 +194,9 @@ function validBody(overrides) {
     watchTime: '1 hrs 0 mins',
     accountStatus: 'Inactive',
     reviewNeeded: true,
-    email: 'member@example.com'
+    email: 'member@example.com',
+    notificationMode: 'permit',
+    cycleId: DEFAULT_CYCLE_ID
   }, overrides || {});
 }
 
@@ -166,6 +209,7 @@ function context(body, projectOverride) {
   return {
     project: projectOverride || project('CMA'),
     currentUser: {login: 'audit-bot'},
+    globalStorage: {extensionProperties: runtime.globalStorage},
     request: {json: function() { return body; }},
     response: response
   };
@@ -201,7 +245,27 @@ function matchExisting(issue) {
 
 function assertNoMutation() {
   assert.deepStrictEqual(runtime.mutations, []);
+  assert.deepStrictEqual(runtime.globalMutations, []);
   assert.strictEqual(runtime.created.length, 0);
+}
+
+function assertReceipt(payload, expected) {
+  assert.strictEqual(payload.notificationPolicyVersion, 1);
+  assert.strictEqual(payload.notificationMode, expected.mode);
+  assert.strictEqual(payload.cycleId, expected.cycleId || DEFAULT_CYCLE_ID);
+  assert.strictEqual(
+    payload.memberNotificationPermitRequired,
+    expected.required
+  );
+  assert.strictEqual(
+    payload.memberNotificationPermitReserved,
+    expected.reserved
+  );
+  assert.strictEqual(
+    payload.memberNotificationBudgetRemaining,
+    expected.remaining
+  );
+  assert.strictEqual(payload.plexUserId, expected.plexUserId || 'plex-123');
 }
 
 function testProjectBoundary() {
@@ -218,6 +282,16 @@ function testPayloadValidationStopsBeforeSearchOrMutation() {
     {body: null, error: /JSON object/},
     {body: validBody({plexUserId: ''}), error: /plexUserId/},
     {body: validBody({email: ''}), error: /email/},
+    {body: validBody({notificationMode: undefined}), error: /notificationMode/},
+    {body: validBody({notificationMode: 'preview'}), error: /notificationMode/},
+    {body: validBody({notificationMode: ' permit '}), error: /notificationMode/},
+    {body: validBody({cycleId: undefined}), error: /cycleId/},
+    {body: validBody({cycleId: 'audit-ABC'}), error: /cycleId/},
+    {body: validBody({cycleId: ' ' + DEFAULT_CYCLE_ID}), error: /cycleId/},
+    {
+      body: validBody({cycleId: 'audit-000000000000000000000000000000001'}),
+      error: /cycleId/
+    },
     {body: validBody({totalPlays: Number.MAX_SAFE_INTEGER + 1}), error: /safe integer/},
     {body: validBody({watchSeconds: 1.5}), error: /safe integer/},
     {body: validBody({watchTime: '999 hrs'}), error: /watchTime does not match/},
@@ -263,7 +337,7 @@ function testFutureTimestampAtSkewBoundaryIsAccepted() {
     lastStreamedMs: NOW + (5 * 60 * 1000)
   }));
   handler(ctx);
-  assert.strictEqual(ctx.response.payload.result, 'healthy-no-ticket');
+  assert.strictEqual(ctx.response.payload.result, 'planned');
   assertNoMutation();
 }
 
@@ -271,7 +345,48 @@ function testHealthyAccountDoesNotCreateOrStampATicket() {
   resetRuntime();
   const ctx = context(validBody({accountStatus: 'Active', reviewNeeded: false}));
   handler(ctx);
-  assert.strictEqual(ctx.response.payload.result, 'healthy-no-ticket');
+  assert.strictEqual(ctx.response.payload.result, 'planned');
+  assert.strictEqual(ctx.response.payload.action, 'facts-only');
+  assert.strictEqual(ctx.response.payload.plannedAction, 'facts-only');
+  assert.strictEqual(ctx.response.payload.reviewStage, null);
+  assertReceipt(ctx.response.payload, {
+    mode: 'permit',
+    required: false,
+    reserved: false,
+    remaining: 1
+  });
+  assertNoMutation();
+}
+
+function testProtocolEndpointIsExactReadOnlyAndCmaScoped() {
+  resetRuntime();
+  let ctx = context(null);
+  protocolHandler(ctx);
+  assert.strictEqual(ctx.response.code, 200);
+  assert.deepStrictEqual(ctx.response.payload, {
+    appName: 'cma-account-audit-member-notification',
+    notificationPolicyVersion: 1,
+    notificationModes: ['suppress', 'permit'],
+    memberNotificationLimit: 1,
+    memberNotificationWindowSeconds: 24 * 60 * 60
+  });
+  assert.strictEqual(runtime.searchCalls.length, 0);
+  assertNoMutation();
+
+  resetRuntime();
+  ctx = context(null, project('SUPPORT'));
+  protocolHandler(ctx);
+  assert.strictEqual(ctx.response.code, 403);
+  assert.strictEqual(runtime.searchCalls.length, 0);
+  assertNoMutation();
+
+  resetRuntime();
+  seedGlobalBudget(NOW + 1);
+  ctx = context(null);
+  protocolHandler(ctx);
+  assert.strictEqual(ctx.response.code, 503);
+  assert.match(ctx.response.payload.error, /budget timestamp/);
+  assert.strictEqual(runtime.searchCalls.length, 0);
   assertNoMutation();
 }
 
@@ -286,7 +401,7 @@ function testCanonicalNeverUsedFactsAreAccepted() {
     reviewNeeded: false
   }));
   handler(ctx);
-  assert.strictEqual(ctx.response.payload.result, 'healthy-no-ticket');
+  assert.strictEqual(ctx.response.payload.result, 'planned');
   assertNoMutation();
 
   resetRuntime();
@@ -301,9 +416,10 @@ function testCanonicalNeverUsedFactsAreAccepted() {
   }));
   handler(ctx);
   assert.strictEqual(ctx.response.payload.result, 'created');
-  assert.strictEqual(ctx.response.payload.action, 'notice-started');
+  assert.strictEqual(ctx.response.payload.action, 'ticket-created-awaiting-notice');
   assert.strictEqual(runtime.created[0].fields['Account Status'].name, 'Never Used');
-  assert.strictEqual(runtime.created[0].fields['Account Audit Confirmed At'], NOW);
+  assert.strictEqual(runtime.created[0].fields['Review Stage'].name, 'Active');
+  assert.strictEqual(runtime.created[0].fields['Account Audit Confirmed At'], undefined);
 }
 
 function testNewReviewRequiresAReporterBeforeCreation() {
@@ -315,23 +431,57 @@ function testNewReviewRequiresAReporterBeforeCreation() {
   assertNoMutation();
 }
 
-function testNewReviewIsCreatedAndStampedOnce() {
+function testNewReviewCreationAndFirstNoticeUseSeparatePermits() {
   resetRuntime();
   runtime.reporters['member@example.com'] = MEMBER;
-  const ctx = context(validBody());
+  let ctx = context(validBody());
   handler(ctx);
   assert.strictEqual(ctx.response.payload.result, 'created');
-  assert.strictEqual(ctx.response.payload.action, 'notice-started');
+  assert.strictEqual(ctx.response.payload.action, 'ticket-created-awaiting-notice');
+  assert.strictEqual(
+    ctx.response.payload.plannedAction,
+    'ticket-created-awaiting-notice'
+  );
   assert.strictEqual(runtime.created.length, 1);
-  assert.strictEqual(runtime.created[0].fields['Review Stage'].name, 'Inactivity Notice');
+  assert.strictEqual(runtime.created[0].fields['Review Stage'].name, 'Active');
   assert.strictEqual(runtime.created[0].fields['Plex User ID'], 'plex-123');
-  assert.strictEqual(runtime.created[0].fields['Account Audit Confirmed At'], NOW);
+  assert.strictEqual(runtime.created[0].fields['Account Audit Confirmed At'], undefined);
   assert.strictEqual(
     runtime.mutations.filter(function(item) {
       return item.fieldName === 'Account Audit Confirmed At';
     }).length,
-    1
+    0
   );
+  assertReceipt(ctx.response.payload, {
+    mode: 'permit',
+    required: true,
+    reserved: true,
+    remaining: 0
+  });
+
+  const created = runtime.created[0];
+  runtime.now += DAY;
+  matchExisting(created);
+  runtime.mutations = [];
+  runtime.globalMutations = [];
+  runtime.effects = [];
+  ctx = context(validBody({
+    cycleId: 'audit-00000000000000000000000000000002'
+  }), created.project);
+  handler(ctx);
+
+  assert.strictEqual(ctx.response.payload.result, 'updated');
+  assert.strictEqual(ctx.response.payload.action, 'notice-started');
+  assert.strictEqual(ctx.response.payload.plannedAction, 'notice-started');
+  assert.strictEqual(created.fields['Review Stage'].name, 'Inactivity Notice');
+  assert.strictEqual(created.fields['Account Audit Confirmed At'], runtime.now);
+  assertReceipt(ctx.response.payload, {
+    mode: 'permit',
+    cycleId: 'audit-00000000000000000000000000000002',
+    required: true,
+    reserved: true,
+    remaining: 0
+  });
 }
 
 function testDuplicateAndCrossIdentifierConflictsDoNotMutate() {
@@ -398,6 +548,34 @@ function testExistingReporterMustResolveAndMatchBeforeMutation() {
   assertNoMutation();
 }
 
+function testAuditCallerMustDifferFromReporter() {
+  resetRuntime();
+  runtime.reporters['member@example.com'] = MEMBER;
+  let ctx = context(validBody());
+  ctx.currentUser = MEMBER;
+  handler(ctx);
+
+  assert.strictEqual(ctx.response.code, 403);
+  assert.match(ctx.response.payload.error, /caller cannot be the ticket reporter/);
+  assertNoMutation();
+
+  resetRuntime();
+  runtime.reporters['member@example.com'] = MEMBER;
+  ctx = context(validBody());
+  ctx.currentUser = {id: 'audit-user-1', login: 'audit-bot'};
+  handler(ctx);
+
+  assert.strictEqual(ctx.response.payload.result, 'created');
+  assert.strictEqual(ctx.response.payload.action, 'ticket-created-awaiting-notice');
+  assertReceipt(ctx.response.payload, {
+    mode: 'permit',
+    required: true,
+    reserved: true,
+    remaining: 0
+  });
+  assert.strictEqual(runtime.created.length, 1);
+}
+
 function testMissingFieldsAndBundleValuesFailBeforeMutation() {
   resetRuntime();
   let targetProject = project('CMA', {missingFields: ['Account Audit Confirmed At']});
@@ -441,7 +619,7 @@ function testSuccessfulExistingUpdateChangesFactsAndExactStamp() {
   assert.strictEqual(ctx.response.payload.action, 'notice-started');
   assert.strictEqual(existing.fields['Review Stage'].name, 'Inactivity Notice');
   assert.strictEqual(existing.fields['Total Plays'], 12);
-  assert.strictEqual(existing.fields['Account Audit Confirmed At'], NOW);
+  assert.strictEqual(existing.fields['Account Audit Confirmed At'], runtime.now);
 }
 
 function testMutationExceptionEscapesAndCannotStampSuccess() {
@@ -470,14 +648,17 @@ function testRepeatedDailySyncDoesNotRestartAnOpenReview() {
 
   const first = context(validBody(), targetProject);
   handler(first);
-  const second = context(validBody(), targetProject);
+  runtime.now += DAY;
+  const second = context(validBody({
+    cycleId: 'audit-00000000000000000000000000000002'
+  }), targetProject);
   handler(second);
 
   assert.strictEqual(first.response.payload.action, 'review-already-in-progress');
   assert.strictEqual(second.response.payload.action, 'review-already-in-progress');
   assert.strictEqual(existing.fields['Review Stage'].name, 'Inactivity Notice');
   assert.strictEqual(runtime.created.length, 0);
-  assert.strictEqual(existing.fields['Account Audit Confirmed At'], NOW);
+  assert.strictEqual(existing.fields['Account Audit Confirmed At'], runtime.now);
 }
 
 function testActivityAutomaticallyRetainsAnOpenReview() {
@@ -506,48 +687,307 @@ function testRetainedReviewNeedsANewActiveBaselineBeforeRestart() {
   assert.strictEqual(ctx.response.payload.action, 'retained-awaiting-new-active-baseline');
   assert.strictEqual(existing.fields['Review Stage'].name, 'Access Retained');
 
-  ctx = context(validBody({accountStatus: 'Active', reviewNeeded: false}), targetProject);
+  runtime.now += DAY;
+  ctx = context(validBody({
+    accountStatus: 'Active',
+    reviewNeeded: false,
+    cycleId: 'audit-00000000000000000000000000000002'
+  }), targetProject);
   handler(ctx);
   assert.strictEqual(ctx.response.payload.action, 'facts-only');
   assert.strictEqual(existing.fields['Account Status'].name, 'Active');
 
-  ctx = context(validBody({accountStatus: 'Inactive', reviewNeeded: true}), targetProject);
+  runtime.now += DAY;
+  ctx = context(validBody({
+    accountStatus: 'Inactive',
+    reviewNeeded: true,
+    cycleId: 'audit-00000000000000000000000000000003'
+  }), targetProject);
   handler(ctx);
   assert.strictEqual(ctx.response.payload.action, 'notice-restarted-after-active-baseline');
   assert.strictEqual(existing.fields['Review Stage'].name, 'Inactivity Notice');
 }
 
-function testTerminalStageIsProtectedButAuditStillStamped() {
+function testPermitModeNonCandidateIsCompletelyReadOnly() {
   resetRuntime();
   const targetProject = project('CMA');
-  const existing = existingIssue(targetProject, {stage: 'Exempt'});
+  const existing = existingIssue(targetProject, {stage: 'Exempt', confirmedAt: 123});
   matchExisting(existing);
   const ctx = context(validBody(), targetProject);
   handler(ctx);
+  assert.strictEqual(ctx.response.payload.result, 'planned');
   assert.strictEqual(ctx.response.payload.action, 'protected-terminal-stage');
   assert.strictEqual(existing.fields['Review Stage'].name, 'Exempt');
-  assert.strictEqual(existing.fields['Account Audit Confirmed At'], NOW);
+  assert.strictEqual(existing.fields['Account Audit Confirmed At'], 123);
+  assertReceipt(ctx.response.payload, {
+    mode: 'permit',
+    required: false,
+    reserved: false,
+    remaining: 1
+  });
+  assertNoMutation();
+}
+
+function testSuppressDefersNewCandidateWithoutAnyMutation() {
+  resetRuntime();
+  runtime.reporters['member@example.com'] = MEMBER;
+  const ctx = context(validBody({notificationMode: 'suppress'}));
+  handler(ctx);
+
+  assert.strictEqual(ctx.response.payload.result, 'deferred');
+  assert.strictEqual(ctx.response.payload.action, 'member-notification-deferred');
+  assert.strictEqual(
+    ctx.response.payload.plannedAction,
+    'ticket-created-awaiting-notice'
+  );
+  assert.strictEqual(ctx.response.payload.issueId, null);
+  assert.strictEqual(ctx.response.payload.reviewStage, null);
+  assertReceipt(ctx.response.payload, {
+    mode: 'suppress',
+    required: true,
+    reserved: false,
+    remaining: 1
+  });
+  assertNoMutation();
+}
+
+function testSuppressConservativelyDefersEveryMessageStage() {
+  [
+    'Inactivity Notice',
+    'Subject to Deletion',
+    'Final Reminder',
+    'Access Removed',
+    'Access Retained'
+  ].forEach(function(stage) {
+    resetRuntime();
+    const targetProject = project('CMA');
+    const existing = existingIssue(targetProject, {stage: stage, confirmedAt: 123});
+    matchExisting(existing);
+    const ctx = context(validBody({notificationMode: 'suppress'}), targetProject);
+    handler(ctx);
+
+    assert.strictEqual(ctx.response.payload.result, 'deferred', stage);
+    assert.strictEqual(
+      ctx.response.payload.action,
+      'member-notification-deferred',
+      stage
+    );
+    assert.strictEqual(ctx.response.payload.reviewStage, stage);
+    assert.strictEqual(existing.fields['Account Audit Confirmed At'], 123);
+    assertReceipt(ctx.response.payload, {
+      mode: 'suppress',
+      required: true,
+      reserved: false,
+      remaining: 1
+    });
+    assertNoMutation();
+  });
+}
+
+function testSuppressPlansSafeExistingFactsWithoutMutation() {
+  ['Exempt', 'Removal Due'].forEach(function(stage) {
+    resetRuntime();
+    const targetProject = project('CMA');
+    const existing = existingIssue(targetProject, {stage: stage, confirmedAt: 123});
+    matchExisting(existing);
+    const ctx = context(validBody({notificationMode: 'suppress'}), targetProject);
+    handler(ctx);
+
+    assert.strictEqual(ctx.response.payload.result, 'planned', stage);
+    assert.strictEqual(ctx.response.payload.reviewStage, stage);
+    assert.strictEqual(existing.fields['Review Stage'].name, stage);
+    assert.strictEqual(existing.fields['Account Audit Confirmed At'], 123);
+    assertReceipt(ctx.response.payload, {
+      mode: 'suppress',
+      required: false,
+      reserved: false,
+      remaining: 1
+    });
+    assertNoMutation();
+  });
+}
+
+function testPermitReservesBeforeSideEffectsAndExhaustsForTwentyFourHours() {
+  resetRuntime();
+  runtime.reporters['member@example.com'] = MEMBER;
+  let ctx = context(validBody());
+  handler(ctx);
+
+  assert.strictEqual(ctx.response.payload.result, 'created');
+  assert.strictEqual(ctx.response.payload.action, 'ticket-created-awaiting-notice');
+  assert.strictEqual(
+    ctx.response.payload.plannedAction,
+    'ticket-created-awaiting-notice'
+  );
+  assertReceipt(ctx.response.payload, {
+    mode: 'permit',
+    required: true,
+    reserved: true,
+    remaining: 0
+  });
+  assert.strictEqual(runtime.globalStorage.cmaMemberNotificationReservedAt, NOW);
+  assert.strictEqual(
+    runtime.globalStorage.cmaMemberNotificationCycleId,
+    DEFAULT_CYCLE_ID
+  );
+  assert.strictEqual(
+    runtime.globalStorage.cmaMemberNotificationPlexUserId,
+    'plex-123'
+  );
+  assert.deepStrictEqual(
+    runtime.effects.slice(0, 4).map(function(effect) { return effect.type; }),
+    ['global', 'global', 'global', 'issue-create']
+  );
+
+  const targetProject = project('CMA');
+  const blocked = existingIssue(targetProject, {
+    id: 'CMA-3',
+    stage: 'Final Reminder',
+    confirmedAt: 123
+  });
+  runtime.matches = {};
+  runtime.reporters = {};
+  matchExisting(blocked);
+  runtime.created = [];
+  runtime.mutations = [];
+  runtime.globalMutations = [];
+  runtime.effects = [];
+  ctx = context(validBody({
+    cycleId: 'audit-00000000000000000000000000000002'
+  }), targetProject);
+  handler(ctx);
+
+  assert.strictEqual(ctx.response.payload.result, 'deferred');
+  assert.strictEqual(
+    ctx.response.payload.action,
+    'member-notification-budget-exhausted'
+  );
+  assert.strictEqual(ctx.response.payload.plannedAction, 'review-already-in-progress');
+  assert.strictEqual(blocked.fields['Account Audit Confirmed At'], 123);
+  assertReceipt(ctx.response.payload, {
+    mode: 'permit',
+    cycleId: 'audit-00000000000000000000000000000002',
+    required: true,
+    reserved: false,
+    remaining: 0
+  });
+  assertNoMutation();
+
+  runtime.now += DAY;
+  ctx = context(validBody({
+    cycleId: 'audit-00000000000000000000000000000003'
+  }), targetProject);
+  handler(ctx);
+  assert.strictEqual(ctx.response.payload.result, 'updated');
+  assertReceipt(ctx.response.payload, {
+    mode: 'permit',
+    cycleId: 'audit-00000000000000000000000000000003',
+    required: true,
+    reserved: true,
+    remaining: 0
+  });
+  assert.strictEqual(
+    runtime.globalStorage.cmaMemberNotificationReservedAt,
+    NOW + DAY
+  );
+}
+
+function testMalformedOrFutureBudgetFailsClosed() {
+  [-1, 1.5, 'not-a-timestamp', NOW + 1].forEach(function(unsafe) {
+    resetRuntime();
+    seedGlobalBudget(unsafe);
+    const ctx = context(validBody({
+      accountStatus: 'Active',
+      reviewNeeded: false
+    }));
+    handler(ctx);
+
+    assert.strictEqual(ctx.response.code, 503, String(unsafe));
+    assert.match(ctx.response.payload.error, /budget timestamp/, String(unsafe));
+    assertNoMutation();
+  });
+
+  resetRuntime();
+  const unavailable = context(validBody({
+    accountStatus: 'Active',
+    reviewNeeded: false
+  }));
+  unavailable.globalStorage = null;
+  handler(unavailable);
+  assert.strictEqual(unavailable.response.code, 503);
+  assert.match(unavailable.response.payload.error, /budget storage/);
+  assertNoMutation();
+
+  ['cycle', 'plex'].forEach(function(property) {
+    resetRuntime();
+    seedGlobalBudget(NOW);
+    if (property === 'cycle') {
+      runtime.globalStorage.cmaMemberNotificationCycleId = 'invalid';
+    } else {
+      runtime.globalStorage.cmaMemberNotificationPlexUserId = '';
+    }
+    runtime.globalMutations = [];
+    runtime.effects = [];
+    const invalidReservation = context(validBody({
+      accountStatus: 'Active',
+      reviewNeeded: false
+    }));
+    handler(invalidReservation);
+    assert.strictEqual(invalidReservation.response.code, 503, property);
+    assert.match(invalidReservation.response.payload.error, /budget reservation/, property);
+    assertNoMutation();
+  });
+}
+
+function testHealthyReceiptReportsAnExistingServerReservation() {
+  resetRuntime();
+  seedGlobalBudget(NOW);
+  const ctx = context(validBody({
+    accountStatus: 'Active',
+    reviewNeeded: false,
+    notificationMode: 'suppress'
+  }));
+  handler(ctx);
+
+  assert.strictEqual(ctx.response.payload.result, 'planned');
+  assert.strictEqual(ctx.response.payload.action, 'facts-only');
+  assert.strictEqual(ctx.response.payload.plannedAction, 'facts-only');
+  assertReceipt(ctx.response.payload, {
+    mode: 'suppress',
+    required: false,
+    reserved: false,
+    remaining: 0
+  });
+  assertNoMutation();
 }
 
 const originalDateNow = Date.now;
-Date.now = function() { return NOW; };
+Date.now = function() { return runtime.now; };
 try {
   testProjectBoundary();
+  testProtocolEndpointIsExactReadOnlyAndCmaScoped();
   testPayloadValidationStopsBeforeSearchOrMutation();
   testFutureTimestampAtSkewBoundaryIsAccepted();
   testHealthyAccountDoesNotCreateOrStampATicket();
   testCanonicalNeverUsedFactsAreAccepted();
   testNewReviewRequiresAReporterBeforeCreation();
-  testNewReviewIsCreatedAndStampedOnce();
+  testNewReviewCreationAndFirstNoticeUseSeparatePermits();
   testDuplicateAndCrossIdentifierConflictsDoNotMutate();
   testExistingReporterMustResolveAndMatchBeforeMutation();
+  testAuditCallerMustDifferFromReporter();
   testMissingFieldsAndBundleValuesFailBeforeMutation();
   testSuccessfulExistingUpdateChangesFactsAndExactStamp();
   testMutationExceptionEscapesAndCannotStampSuccess();
   testRepeatedDailySyncDoesNotRestartAnOpenReview();
   testActivityAutomaticallyRetainsAnOpenReview();
   testRetainedReviewNeedsANewActiveBaselineBeforeRestart();
-  testTerminalStageIsProtectedButAuditStillStamped();
+  testPermitModeNonCandidateIsCompletelyReadOnly();
+  testSuppressDefersNewCandidateWithoutAnyMutation();
+  testSuppressConservativelyDefersEveryMessageStage();
+  testSuppressPlansSafeExistingFactsWithoutMutation();
+  testPermitReservesBeforeSideEffectsAndExhaustsForTwentyFourHours();
+  testMalformedOrFutureBudgetFailsClosed();
+  testHealthyReceiptReportsAnExistingServerReservation();
 } finally {
   Date.now = originalDateNow;
 }
