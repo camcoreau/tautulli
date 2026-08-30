@@ -112,6 +112,39 @@ def protocol_receipt(**overrides):
     return receipt
 
 
+class JsonHttpClientTests(unittest.TestCase):
+    def test_normalizes_low_level_timeout_without_exposing_query_parameters(self):
+        client = audit.JsonHttpClient(timeout_seconds=5)
+        with mock.patch.object(
+            audit.urllib.request,
+            "urlopen",
+            side_effect=TimeoutError("socket timed out"),
+        ):
+            with self.assertRaisesRegex(
+                audit.RemoteApiError,
+                r"GET https://youtrack\.example\.invalid/protocol failed: socket timed out",
+            ) as raised:
+                client.request(
+                    "https://youtrack.example.invalid/protocol?token=secret"
+                )
+
+        self.assertNotIn("token", str(raised.exception))
+        self.assertNotIn("secret", str(raised.exception))
+
+    def test_normalizes_low_level_http_transport_failures(self):
+        client = audit.JsonHttpClient(timeout_seconds=5)
+        with mock.patch.object(
+            audit.urllib.request,
+            "urlopen",
+            side_effect=audit.http.client.IncompleteRead(b"partial"),
+        ):
+            with self.assertRaisesRegex(
+                audit.RemoteApiError,
+                r"GET https://youtrack\.example\.invalid/protocol failed:",
+            ):
+                client.request("https://youtrack.example.invalid/protocol")
+
+
 class ClassificationTests(unittest.TestCase):
     def test_active_inside_sixty_day_window(self):
         result = audit.classify_account(
