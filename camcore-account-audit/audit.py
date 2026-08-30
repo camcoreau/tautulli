@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import sys
@@ -221,6 +222,8 @@ class JsonHttpClient:
             ) from exc
         except urllib.error.URLError as exc:
             raise RemoteApiError(f"{method} {display_url} failed: {exc.reason}") from exc
+        except (OSError, http.client.HTTPException) as exc:
+            raise RemoteApiError(f"{method} {display_url} failed: {exc}") from exc
 
         if not payload:
             return None
