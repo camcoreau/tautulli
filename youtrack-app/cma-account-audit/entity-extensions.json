@@ -1,0 +1,18 @@
+{
+  "entityTypeExtensions": [
+    {
+      "entityType": "AppGlobalStorage",
+      "properties": {
+        "cmaMemberNotificationReservedAt": {
+          "type": "integer"
+        },
+        "cmaMemberNotificationCycleId": {
+          "type": "string"
+        },
+        "cmaMemberNotificationPlexUserId": {
+          "type": "string"
+        }
+      }
+    }
+  ]
+}
