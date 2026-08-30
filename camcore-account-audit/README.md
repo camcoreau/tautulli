@@ -95,6 +95,13 @@ still retained so a restart continues to fail closed. A server-budget deferral
 or a valid response that no longer needs a permit is determinate and can safely
 complete the cycle.
 
+If two permit transactions race the same available server budget, YouTrack can
+commit one and reject the losing transaction with its structured `400 Invalid
+properties` optimistic-conflict response. The worker retries only that exact
+permit-only conflict once with the identical cycle and payload. The committed
+global budget then returns a determinate budget-exhausted receipt; every other
+HTTP error, any suppress error, and a second conflict remain fail-closed.
+
 Dry-run mode makes no YouTrack calls and neither reads nor reserves a remote
 permit. It records only the local account classification and completion state in
 the selected isolated registry.
