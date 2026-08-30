@@ -260,8 +260,11 @@ function planReviewDecision(issue, body, previousAccountStatus) {
     };
   }
 
+  const isStagedBeforeFirstNotice = currentStage === 'Active' &&
+    previousAccountStatus !== 'Active';
   if (body.accountStatus === 'Active' &&
-      REVIEW_STAGES_IN_PROGRESS.indexOf(currentStage) !== -1) {
+      (isStagedBeforeFirstNotice ||
+       REVIEW_STAGES_IN_PROGRESS.indexOf(currentStage) !== -1)) {
     return {action: 'retained', targetStage: 'Access Retained'};
   }
 
@@ -632,4 +635,3 @@ exports.httpHandler = {
     }
   }
 };
-
