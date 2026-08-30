@@ -1,3 +1,11 @@
+<!-- CAMCORE-REPOSITORY-BRANDING:START -->
+<p align="center">
+  <a href="https://camcore.au">
+    <img src=".github/brand/camcore-repository-banner.svg" alt="CamCore" width="520">
+  </a>
+</p>
+<!-- CAMCORE-REPOSITORY-BRANDING:END -->
+
 # CamCore Media Insights
 
 CamCore-maintained downstream of [Tautulli](https://github.com/Tautulli/Tautulli) for monitoring, analytics, notifications and weekly Cameron-Media updates.
