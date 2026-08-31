@@ -102,6 +102,11 @@ permit-only conflict once with the identical cycle and payload. The committed
 global budget then returns a determinate budget-exhausted receipt; every other
 HTTP error, any suppress error, and a second conflict remain fail-closed.
 
+Transient transport failures on idempotent `GET` requests are retried once
+after one second. `POST` requests are never retried by the HTTP client, so an
+ambiguous YouTrack write cannot be duplicated; the permit-only optimistic
+conflict handling above remains the sole reviewed write retry.
+
 Dry-run mode makes no YouTrack calls and neither reads nor reserves a remote
 permit. It records only the local account classification and completion state in
 the selected isolated registry.
