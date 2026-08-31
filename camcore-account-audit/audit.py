@@ -31,6 +31,7 @@ NOTIFICATION_MODE_PERMIT = "permit"
 NOTIFICATION_DEFERRED_ACTION = "member-notification-deferred"
 NOTIFICATION_BUDGET_EXHAUSTED_ACTION = "member-notification-budget-exhausted"
 TICKET_CREATED_AWAITING_NOTICE_ACTION = "ticket-created-awaiting-notice"
+TRANSIENT_GET_RETRY_DELAY_SECONDS = 1.0
 NOTIFICATION_GATE_STATUSES = frozenset(
     {
         "reserved",
@@ -215,26 +216,38 @@ class JsonHttpClient:
             request_headers["Content-Type"] = "application/json"
             encoded_body = json.dumps(body, separators=(",", ":")).encode("utf-8")
 
-        request = urllib.request.Request(
-            url,
-            data=encoded_body,
-            headers=request_headers,
-            method=method,
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                payload = response.read().decode("utf-8")
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")[:500]
-            raise RemoteHttpError(
-                f"{method} {display_url} returned HTTP {exc.code}: {detail}",
-                status_code=exc.code,
-                detail=detail,
-            ) from exc
-        except urllib.error.URLError as exc:
-            raise RemoteApiError(f"{method} {display_url} failed: {exc.reason}") from exc
-        except (OSError, http.client.HTTPException) as exc:
-            raise RemoteApiError(f"{method} {display_url} failed: {exc}") from exc
+        for attempt in range(2):
+            request = urllib.request.Request(
+                url,
+                data=encoded_body,
+                headers=request_headers,
+                method=method,
+            )
+            try:
+                with urllib.request.urlopen(
+                    request, timeout=self.timeout_seconds
+                ) as response:
+                    payload = response.read().decode("utf-8")
+                break
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")[:500]
+                raise RemoteHttpError(
+                    f"{method} {display_url} returned HTTP {exc.code}: {detail}",
+                    status_code=exc.code,
+                    detail=detail,
+                ) from exc
+            except urllib.error.URLError as exc:
+                if method == "GET" and attempt == 0:
+                    time.sleep(TRANSIENT_GET_RETRY_DELAY_SECONDS)
+                    continue
+                raise RemoteApiError(
+                    f"{method} {display_url} failed: {exc.reason}"
+                ) from exc
+            except (OSError, http.client.HTTPException) as exc:
+                if method == "GET" and attempt == 0:
+                    time.sleep(TRANSIENT_GET_RETRY_DELAY_SECONDS)
+                    continue
+                raise RemoteApiError(f"{method} {display_url} failed: {exc}") from exc
 
         if not payload:
             return None
