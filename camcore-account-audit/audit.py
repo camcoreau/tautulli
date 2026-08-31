@@ -31,6 +31,10 @@ NOTIFICATION_MODE_PERMIT = "permit"
 NOTIFICATION_DEFERRED_ACTION = "member-notification-deferred"
 NOTIFICATION_BUDGET_EXHAUSTED_ACTION = "member-notification-budget-exhausted"
 TICKET_CREATED_AWAITING_NOTICE_ACTION = "ticket-created-awaiting-notice"
+ONBOARDING_PROTOCOL_VERSION = 1
+ONBOARDING_TICKET_CREATED_ACTION = "onboarding-ticket-created"
+ONBOARDING_EXISTING_TICKET_ACTION = "onboarding-existing-ticket"
+ONBOARDING_STATES = frozenset({"baseline", "pending", "completed"})
 TRANSIENT_GET_RETRY_DELAY_SECONDS = 1.0
 PERMIT_CONFLICT_RETRY_DELAYS_SECONDS = (0.25, 0.5, 1.0)
 NOTIFICATION_GATE_STATUSES = frozenset(
@@ -50,6 +54,8 @@ NOTIFICATION_PLANNED_ACTIONS = frozenset(
         "retained",
         "retained-awaiting-new-active-baseline",
         "review-already-in-progress",
+        ONBOARDING_TICKET_CREATED_ACTION,
+        ONBOARDING_EXISTING_TICKET_ACTION,
         TICKET_CREATED_AWAITING_NOTICE_ACTION,
     }
 )
@@ -327,6 +333,7 @@ class YouTrackClient:
         account: Account,
         decision: Decision,
         *,
+        onboarding_requested: bool,
         notification_mode: str,
         cycle_id: str,
     ) -> Any:
@@ -345,6 +352,7 @@ class YouTrackClient:
             "accountStatus": decision.account_status,
             "reviewNeeded": decision.review_needed,
             "reviewReason": decision.reason,
+            "onboardingRequested": onboarding_requested,
             "notificationMode": notification_mode,
             "cycleId": cycle_id,
         }
@@ -479,6 +487,7 @@ class Registry:
         self.data = loaded
         self._notification_gate()
         self._notification_permit_history()
+        self.onboarding_baseline_ready()
 
     def _notification_permit_history(self) -> dict[str, str]:
         history = self.data.setdefault("memberNotificationPermitHistory", {})
@@ -614,8 +623,27 @@ class Registry:
             )
         return reserved_at
 
-    def first_seen(self, account: Account, observed_at: datetime) -> datetime:
+    def onboarding_baseline_ready(self) -> bool:
+        raw = self.data.get("onboardingBaselineCompletedAt")
+        if raw is None:
+            return False
+        try:
+            completed_at = datetime.fromisoformat(raw)
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError(
+                f"Invalid onboardingBaselineCompletedAt in {self.path}"
+            ) from exc
+        if completed_at.tzinfo is None or completed_at.utcoffset() is None:
+            raise ConfigurationError(
+                f"Invalid onboardingBaselineCompletedAt timezone in {self.path}"
+            )
+        return True
+
+    def observe_account(
+        self, account: Account, observed_at: datetime
+    ) -> tuple[datetime, bool]:
         users = self.data["users"]
+        known = account.user_id in users
         entry = users.setdefault(
             account.user_id,
             {
@@ -624,14 +652,58 @@ class Registry:
                 "username": account.username,
             },
         )
+        if not isinstance(entry, dict):
+            raise ConfigurationError(
+                f"Invalid registry entry for Plex user ID {account.user_id}"
+            )
         entry["lastSeenAt"] = observed_at.isoformat()
         entry["username"] = account.username
+        state = entry.get("onboardingState")
+        if state is None:
+            state = (
+                "pending"
+                if self.onboarding_baseline_ready() and not known
+                else "baseline"
+            )
+            entry["onboardingState"] = state
+        if state not in ONBOARDING_STATES:
+            raise ConfigurationError(
+                f"Invalid onboardingState for Plex user ID {account.user_id}"
+            )
         try:
-            return datetime.fromisoformat(entry["firstSeenAt"]).astimezone(UTC)
+            first_seen = datetime.fromisoformat(entry["firstSeenAt"])
         except (KeyError, TypeError, ValueError) as exc:
             raise ConfigurationError(
                 f"Invalid firstSeenAt for Plex user ID {account.user_id}"
             ) from exc
+        if first_seen.tzinfo is None or first_seen.utcoffset() is None:
+            raise ConfigurationError(
+                f"Invalid firstSeenAt timezone for Plex user ID {account.user_id}"
+            )
+        return first_seen.astimezone(UTC), state == "pending"
+
+    def first_seen(self, account: Account, observed_at: datetime) -> datetime:
+        first_seen, _ = self.observe_account(account, observed_at)
+        return first_seen
+
+    def complete_onboarding_baseline(
+        self, observed_at: datetime, *, inventory_count: int
+    ) -> None:
+        if self.onboarding_baseline_ready():
+            return
+        if inventory_count <= 0:
+            raise ConfigurationError(
+                "Refusing to establish an empty Cameron-Media onboarding baseline"
+            )
+        self.data["onboardingBaselineCompletedAt"] = observed_at.isoformat()
+
+    def confirm_onboarding(self, account: Account) -> None:
+        entry = self.data["users"].get(account.user_id)
+        if not isinstance(entry, dict) or entry.get("onboardingState") != "pending":
+            raise ConfigurationError(
+                f"Pending onboarding state is missing for Plex user ID {account.user_id}"
+            )
+        entry["onboardingState"] = "completed"
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -649,6 +721,7 @@ def validate_sync_response(
     notification_mode: str,
     cycle_id: str,
     plex_user_id: str,
+    onboarding_requested: bool,
 ) -> dict[str, Any]:
     if not isinstance(response, dict):
         raise RemoteApiError("YouTrack account sync returned an invalid response")
@@ -665,6 +738,12 @@ def validate_sync_response(
         raise RemoteApiError("YouTrack account sync returned the wrong cycle ID")
     if response.get("plexUserId") != plex_user_id:
         raise RemoteApiError("YouTrack account sync returned the wrong Plex user ID")
+    if response.get("onboardingRequested") is not onboarding_requested:
+        raise RemoteApiError("YouTrack account sync returned the wrong onboarding request")
+    if not isinstance(response.get("onboardingCompleted"), bool):
+        raise RemoteApiError("YouTrack account sync omitted its onboarding receipt")
+    if response["onboardingCompleted"] and not onboarding_requested:
+        raise RemoteApiError("YouTrack account sync returned a contradictory onboarding receipt")
     if not isinstance(response.get("memberNotificationPermitRequired"), bool):
         raise RemoteApiError("YouTrack account sync omitted its permit requirement")
     if not isinstance(response.get("memberNotificationPermitReserved"), bool):
@@ -684,6 +763,31 @@ def validate_sync_response(
     planned_action = response.get("plannedAction")
     if planned_action not in NOTIFICATION_PLANNED_ACTIONS:
         raise RemoteApiError("YouTrack account sync returned an invalid planned action")
+    onboarding_completed = response["onboardingCompleted"]
+    if onboarding_completed:
+        completed_by_creation = (
+            planned_action == ONBOARDING_TICKET_CREATED_ACTION
+            and notification_mode == NOTIFICATION_MODE_PERMIT
+            and permit_required
+            and permit_reserved
+            and result == "created"
+            and action == planned_action
+        )
+        completed_by_existing_ticket = (
+            planned_action == ONBOARDING_EXISTING_TICKET_ACTION
+            and not permit_required
+            and not permit_reserved
+            and result == "planned"
+            and action == planned_action
+        )
+        if not completed_by_creation and not completed_by_existing_ticket:
+            raise RemoteApiError(
+                "YouTrack account sync returned an unsafe onboarding completion"
+            )
+    elif onboarding_requested and planned_action == ONBOARDING_EXISTING_TICKET_ACTION:
+        raise RemoteApiError(
+            "YouTrack account sync did not confirm the existing onboarding ticket"
+        )
     if notification_mode == NOTIFICATION_MODE_SUPPRESS:
         if permit_reserved:
             raise RemoteApiError("Suppress mode unexpectedly reserved a notification permit")
@@ -731,6 +835,7 @@ def validate_protocol_response(response: Any) -> dict[str, Any]:
         "notificationModes",
         "memberNotificationLimit",
         "memberNotificationWindowSeconds",
+        "onboardingProtocolVersion",
     }
     if not isinstance(response, dict) or set(response) != expected_keys:
         raise RemoteApiError("YouTrack account sync protocol receipt is incompatible")
@@ -745,6 +850,13 @@ def validate_protocol_response(response: Any) -> dict[str, Any]:
         raise RemoteApiError("YouTrack account sync notification policy is incompatible")
     if response.get("notificationModes") != list(NOTIFICATION_PROTOCOL_MODES):
         raise RemoteApiError("YouTrack account sync protocol modes are incompatible")
+    onboarding_version = response.get("onboardingProtocolVersion")
+    if (
+        isinstance(onboarding_version, bool)
+        or not isinstance(onboarding_version, int)
+        or onboarding_version != ONBOARDING_PROTOCOL_VERSION
+    ):
+        raise RemoteApiError("YouTrack account sync onboarding protocol is incompatible")
     member_limit = response.get("memberNotificationLimit")
     if (
         isinstance(member_limit, bool)
@@ -765,6 +877,7 @@ def validate_protocol_response(response: Any) -> dict[str, Any]:
 def candidate_priority(response: dict[str, Any]) -> int:
     planned_action = response.get("plannedAction")
     priorities = {
+        ONBOARDING_TICKET_CREATED_ACTION: -1,
         "retained": 0,
         "notice-started": 1,
         "notice-restarted-after-active-baseline": 1,
@@ -950,7 +1063,7 @@ def _run_once_locked(
             print(json.dumps({"event": "excluded", "username": account.username}))
             continue
 
-        first_seen = registry.first_seen(account, observed_at)
+        first_seen, onboarding_requested = registry.observe_account(account, observed_at)
         decision = classify_account(
             account,
             first_seen=first_seen,
@@ -964,8 +1077,19 @@ def _run_once_locked(
             "decision": asdict(decision),
             "dryRun": config.dry_run,
             "cycleId": cycle_id,
+            "onboardingRequested": onboarding_requested,
         }
-        entries.append({"account": account, "decision": decision, "event": event})
+        entries.append({
+            "account": account,
+            "decision": decision,
+            "event": event,
+            "onboardingRequested": onboarding_requested,
+        })
+
+    registry.complete_onboarding_baseline(
+        observed_at,
+        inventory_count=len(entries),
+    )
 
     if config.dry_run:
         for entry in entries:
@@ -997,6 +1121,7 @@ def _run_once_locked(
             response = youtrack.sync(
                 account,
                 decision,
+                onboarding_requested=entry["onboardingRequested"],
                 notification_mode=NOTIFICATION_MODE_SUPPRESS,
                 cycle_id=cycle_id,
             )
@@ -1005,8 +1130,12 @@ def _run_once_locked(
                 notification_mode=NOTIFICATION_MODE_SUPPRESS,
                 cycle_id=cycle_id,
                 plex_user_id=account.user_id,
+                onboarding_requested=entry["onboardingRequested"],
             )
             event["youtrackSuppress"] = response
+            if response["onboardingCompleted"]:
+                registry.confirm_onboarding(account)
+                entry["onboardingRequested"] = False
             if response["memberNotificationPermitRequired"]:
                 candidates.append({**entry, "suppress": response})
             processed += 1
@@ -1055,6 +1184,7 @@ def _run_once_locked(
             permit_response = youtrack.sync(
                 selected_account,
                 selected["decision"],
+                onboarding_requested=selected["onboardingRequested"],
                 notification_mode=NOTIFICATION_MODE_PERMIT,
                 cycle_id=cycle_id,
             )
@@ -1063,8 +1193,12 @@ def _run_once_locked(
                 notification_mode=NOTIFICATION_MODE_PERMIT,
                 cycle_id=cycle_id,
                 plex_user_id=selected_account.user_id,
+                onboarding_requested=selected["onboardingRequested"],
             )
             selected["event"]["youtrackPermit"] = permit_response
+            if permit_response["onboardingCompleted"]:
+                registry.confirm_onboarding(selected_account)
+                selected["onboardingRequested"] = False
             if permit_response["memberNotificationPermitReserved"]:
                 permit_status = "confirmed"
             elif permit_response.get("action") == NOTIFICATION_BUDGET_EXHAUSTED_ACTION:

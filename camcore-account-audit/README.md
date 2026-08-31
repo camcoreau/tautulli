@@ -13,6 +13,11 @@ Plex access. The final destructive action remains an administrator task in the
 - The stable Plex user ID is the idempotency key. Repeated runs update the same
   ticket instead of creating duplicates. If the ID and username resolve to
   different tickets, synchronization stops without changing either ticket.
+- After the onboarding baseline has been established, the first observation of
+  a new Plex user requests one `Welcome to Cameron-Media` ticket. Its Helpdesk
+  creation email includes the Plex Web App, player-app and CamCore help links.
+  That ticket remains the member's lifetime CMA account record, so later
+  inactivity reviews update it instead of opening a duplicate.
 - Accounts that stream again while a review is pending move to `Access Retained`.
 - A retained ticket cannot restart from the same inactive evidence. It must first
   receive an `Active` audit result, then later become reviewable again.
@@ -29,6 +34,26 @@ The 14-day timer is based on the first time this worker observes a zero-play
 account because Tautulli does not expose a reliable share-created timestamp in
 the users-table API. The small registry at `/data/registry.json` preserves that
 observation date across restarts.
+
+## New-member onboarding baseline
+
+The first run of version 1.3 records every currently visible, non-excluded Plex
+user as the onboarding baseline. It never creates welcome tickets for that
+initial inventory. Only a Plex user ID first observed after the durable
+`onboardingBaselineCompletedAt` marker exists is marked `pending`.
+
+Dry-run establishes the same local baseline without contacting YouTrack. A
+pending onboarding remains pending across restarts and dry-runs until the app
+returns a determinate receipt proving either that the welcome ticket was created
+or that the lifetime CMA ticket already exists. An ambiguous response never
+marks onboarding complete. Refusing to establish an empty baseline prevents a
+temporary empty Tautulli inventory from turning every returning member into a
+new-member candidate.
+
+Welcome-ticket creation still uses the existing one-per-24-hour member-
+notification gate because creating a Helpdesk ticket can email its reporter.
+If the gate is occupied, onboarding stays queued and is retried on later audit
+cycles; it does not bypass or weaken the existing notification safety policy.
 
 ## Member-notification safety gate
 
@@ -84,7 +109,7 @@ when the cycle exits or the process stops.
 The registry deliberately retains `schemaVersion: 1`. The new notification gate
 and per-user history are additional top-level keys, so the previous worker can
 load the registry and preserves those keys when it saves. A previous-image
-rollback must still remain `DRY_RUN=true` with the version 1.2 app installed:
+rollback must still remain `DRY_RUN=true` with the version 1.3 app installed:
 the old worker does not understand the notification protocol, and its legacy
 live requests are intentionally rejected by the updated app.
 
@@ -138,7 +163,7 @@ Do not grant the account access to Support or Operations.
 2. Keep the existing worker in dry-run and keep `communication-catchup`
    detached. Upload the same-name `cma-account-audit` app update in place and
    confirm it remains attached only to CMA. The app must be updated before the
-   worker because the live worker requires the new read-only handshake and
+   worker because the live worker requires the onboarding-capable read-only handshake and
    rejects legacy or mismatched protocol receipts before account enumeration.
 3. Start from `compose.example.yml` and attach the service to the network that can
    reach Tautulli. Set `CMA_ACCOUNT_AUDIT_IMAGE` to the immutable `master-<sha>`
@@ -148,7 +173,8 @@ Do not grant the account access to Support or Operations.
    and projected review set in logs without contacting YouTrack or members.
 5. Validate the new app protocol with a staff-only canary. Change to
    `DRY_RUN=false` and `/data/registry.json` only after the canary and fresh
-   projection pass the one-notification gate. Keep the immutable image, volume,
+   projection pass the one-notification gate and confirm the baseline contains
+   the current Plex inventory without any pending welcomes. Keep the immutable image, volume,
    network, secrets and daily interval unchanged during that cutover.
 
 `AUDIT_INTERVAL_SECONDS=86400` runs the worker daily. Set it to `0` for a

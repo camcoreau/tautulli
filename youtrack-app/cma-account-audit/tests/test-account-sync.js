@@ -194,6 +194,7 @@ function validBody(overrides) {
     watchTime: '1 hrs 0 mins',
     accountStatus: 'Inactive',
     reviewNeeded: true,
+    onboardingRequested: false,
     email: 'member@example.com',
     notificationMode: 'permit',
     cycleId: DEFAULT_CYCLE_ID
@@ -266,6 +267,14 @@ function assertReceipt(payload, expected) {
     expected.remaining
   );
   assert.strictEqual(payload.plexUserId, expected.plexUserId || 'plex-123');
+  assert.strictEqual(
+    payload.onboardingRequested,
+    expected.onboardingRequested || false
+  );
+  assert.strictEqual(
+    payload.onboardingCompleted,
+    expected.onboardingCompleted || false
+  );
 }
 
 function testProjectBoundary() {
@@ -282,6 +291,7 @@ function testPayloadValidationStopsBeforeSearchOrMutation() {
     {body: null, error: /JSON object/},
     {body: validBody({plexUserId: ''}), error: /plexUserId/},
     {body: validBody({email: ''}), error: /email/},
+    {body: validBody({onboardingRequested: 'yes'}), error: /onboardingRequested/},
     {body: validBody({notificationMode: undefined}), error: /notificationMode/},
     {body: validBody({notificationMode: 'preview'}), error: /notificationMode/},
     {body: validBody({notificationMode: ' permit '}), error: /notificationMode/},
@@ -368,7 +378,8 @@ function testProtocolEndpointIsExactReadOnlyAndCmaScoped() {
     notificationPolicyVersion: 1,
     notificationModes: ['suppress', 'permit'],
     memberNotificationLimit: 1,
-    memberNotificationWindowSeconds: 24 * 60 * 60
+    memberNotificationWindowSeconds: 24 * 60 * 60,
+    onboardingProtocolVersion: 1
   });
   assert.strictEqual(runtime.searchCalls.length, 0);
   assertNoMutation();
@@ -1006,6 +1017,80 @@ function testHealthyReceiptReportsAnExistingServerReservation() {
   assertNoMutation();
 }
 
+function testNewMemberOnboardingCreatesOneWelcomeTicketAndRetriesIdempotently() {
+  resetRuntime();
+  runtime.reporters['member@example.com'] = MEMBER;
+  const onboarding = {
+    accountStatus: 'Never Used',
+    totalPlays: 0,
+    watchSeconds: 0,
+    watchTime: '0 mins',
+    lastStreamedMs: null,
+    reviewNeeded: false,
+    onboardingRequested: true
+  };
+
+  let ctx = context(validBody(Object.assign({
+    notificationMode: 'suppress'
+  }, onboarding)));
+  handler(ctx);
+  assert.strictEqual(ctx.response.payload.result, 'deferred');
+  assert.strictEqual(ctx.response.payload.plannedAction, 'onboarding-ticket-created');
+  assertReceipt(ctx.response.payload, {
+    mode: 'suppress',
+    required: true,
+    reserved: false,
+    remaining: 1,
+    onboardingRequested: true,
+    onboardingCompleted: false
+  });
+  assertNoMutation();
+
+  ctx = context(validBody(onboarding));
+  handler(ctx);
+  assert.strictEqual(ctx.response.payload.result, 'created');
+  assert.strictEqual(ctx.response.payload.action, 'onboarding-ticket-created');
+  assertReceipt(ctx.response.payload, {
+    mode: 'permit',
+    required: true,
+    reserved: true,
+    remaining: 0,
+    onboardingRequested: true,
+    onboardingCompleted: true
+  });
+  assert.strictEqual(runtime.created.length, 1);
+  const welcome = runtime.created[0];
+  assert.strictEqual(welcome.summary, 'Welcome to Cameron-Media — member');
+  assert.match(welcome.description, /https:\/\/app\.plex\.tv\/desktop\//);
+  assert.match(welcome.description, /https:\/\/www\.plex\.tv\/apps-devices\//);
+  assert.match(welcome.description, /help@camcore\.au/);
+  assert.strictEqual(welcome.fields['Review Stage'].name, 'Active');
+  assert.strictEqual(welcome.fields['Account Audit Confirmed At'], runtime.now);
+
+  matchExisting(welcome);
+  runtime.created = [];
+  runtime.mutations = [];
+  runtime.globalMutations = [];
+  runtime.effects = [];
+  ctx = context(validBody(Object.assign({
+    notificationMode: 'suppress',
+    cycleId: 'audit-00000000000000000000000000000002'
+  }, onboarding)), welcome.project);
+  handler(ctx);
+  assert.strictEqual(ctx.response.payload.result, 'planned');
+  assert.strictEqual(ctx.response.payload.action, 'onboarding-existing-ticket');
+  assertReceipt(ctx.response.payload, {
+    mode: 'suppress',
+    cycleId: 'audit-00000000000000000000000000000002',
+    required: false,
+    reserved: false,
+    remaining: 0,
+    onboardingRequested: true,
+    onboardingCompleted: true
+  });
+  assertNoMutation();
+}
+
 const originalDateNow = Date.now;
 Date.now = function() { return runtime.now; };
 try {
@@ -1034,6 +1119,7 @@ try {
   testPermitReservesBeforeSideEffectsAndExhaustsForTwentyFourHours();
   testMalformedOrFutureBudgetFailsClosed();
   testHealthyReceiptReportsAnExistingServerReservation();
+  testNewMemberOnboardingCreatesOneWelcomeTicketAndRetriesIdempotently();
 } finally {
   Date.now = originalDateNow;
 }
