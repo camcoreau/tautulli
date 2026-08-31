@@ -230,19 +230,25 @@ class YouTrackClientTests(unittest.TestCase):
     def test_permit_retries_one_structured_youtrack_transaction_conflict(self):
         http = self.RecordingHttp([self.conflict()])
 
-        self.assertEqual(
-            {"result": "deferred"},
-            self.sync(http, audit.NOTIFICATION_MODE_PERMIT),
-        )
+        with mock.patch.object(audit.time, "sleep") as sleep:
+            self.assertEqual(
+                {"result": "deferred"},
+                self.sync(http, audit.NOTIFICATION_MODE_PERMIT),
+            )
         self.assertEqual(2, len(http.calls))
         self.assertEqual(http.calls[0], http.calls[1])
+        sleep.assert_called_once_with(
+            audit.PERMIT_CONFLICT_RETRY_DELAYS_SECONDS[0]
+        )
 
     def test_suppress_never_retries_a_transaction_conflict(self):
         http = self.RecordingHttp([self.conflict()])
 
-        with self.assertRaises(audit.RemoteHttpError):
-            self.sync(http, audit.NOTIFICATION_MODE_SUPPRESS)
+        with mock.patch.object(audit.time, "sleep") as sleep:
+            with self.assertRaises(audit.RemoteHttpError):
+                self.sync(http, audit.NOTIFICATION_MODE_SUPPRESS)
         self.assertEqual(1, len(http.calls))
+        sleep.assert_not_called()
 
     def test_permit_does_not_retry_other_http_400_responses(self):
         error = audit.RemoteHttpError(
@@ -252,16 +258,48 @@ class YouTrackClientTests(unittest.TestCase):
         )
         http = self.RecordingHttp([error])
 
-        with self.assertRaises(audit.RemoteHttpError):
-            self.sync(http, audit.NOTIFICATION_MODE_PERMIT)
+        with mock.patch.object(audit.time, "sleep") as sleep:
+            with self.assertRaises(audit.RemoteHttpError):
+                self.sync(http, audit.NOTIFICATION_MODE_PERMIT)
         self.assertEqual(1, len(http.calls))
+        sleep.assert_not_called()
 
-    def test_permit_retries_a_transaction_conflict_only_once(self):
-        http = self.RecordingHttp([self.conflict(), self.conflict()])
+    def test_permit_retries_transaction_conflicts_with_bounded_backoff(self):
+        http = self.RecordingHttp(
+            [self.conflict(), self.conflict(), self.conflict()]
+        )
 
-        with self.assertRaises(audit.RemoteHttpError):
-            self.sync(http, audit.NOTIFICATION_MODE_PERMIT)
-        self.assertEqual(2, len(http.calls))
+        with mock.patch.object(audit.time, "sleep") as sleep:
+            self.assertEqual(
+                {"result": "deferred"},
+                self.sync(http, audit.NOTIFICATION_MODE_PERMIT),
+            )
+        self.assertEqual(4, len(http.calls))
+        self.assertTrue(all(call == http.calls[0] for call in http.calls))
+        self.assertEqual(
+            [mock.call(delay) for delay in audit.PERMIT_CONFLICT_RETRY_DELAYS_SECONDS],
+            sleep.call_args_list,
+        )
+
+    def test_permit_conflict_retry_budget_remains_fail_closed(self):
+        http = self.RecordingHttp(
+            [
+                self.conflict()
+                for _ in range(len(audit.PERMIT_CONFLICT_RETRY_DELAYS_SECONDS) + 1)
+            ]
+        )
+
+        with mock.patch.object(audit.time, "sleep") as sleep:
+            with self.assertRaises(audit.RemoteHttpError):
+                self.sync(http, audit.NOTIFICATION_MODE_PERMIT)
+        self.assertEqual(
+            len(audit.PERMIT_CONFLICT_RETRY_DELAYS_SECONDS) + 1,
+            len(http.calls),
+        )
+        self.assertEqual(
+            [mock.call(delay) for delay in audit.PERMIT_CONFLICT_RETRY_DELAYS_SECONDS],
+            sleep.call_args_list,
+        )
 
 
 class ClassificationTests(unittest.TestCase):
