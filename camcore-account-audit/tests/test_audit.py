@@ -113,6 +113,60 @@ def protocol_receipt(**overrides):
 
 
 class JsonHttpClientTests(unittest.TestCase):
+    @staticmethod
+    def response(payload):
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = json.dumps(payload).encode("utf-8")
+        return response
+
+    def test_retries_one_transient_get_transport_failure(self):
+        client = audit.JsonHttpClient(timeout_seconds=5)
+        response = self.response({"response": {"result": "success"}})
+        with mock.patch.object(
+            audit.urllib.request,
+            "urlopen",
+            side_effect=[ConnectionResetError("connection reset"), response],
+        ) as urlopen, mock.patch.object(audit.time, "sleep") as sleep:
+            result = client.request("http://127.0.0.1:8181/api/v2")
+
+        self.assertEqual({"response": {"result": "success"}}, result)
+        self.assertEqual(2, urlopen.call_count)
+        sleep.assert_called_once_with(audit.TRANSIENT_GET_RETRY_DELAY_SECONDS)
+
+    def test_does_not_retry_post_transport_failures(self):
+        client = audit.JsonHttpClient(timeout_seconds=5)
+        with mock.patch.object(
+            audit.urllib.request,
+            "urlopen",
+            side_effect=ConnectionResetError("connection reset"),
+        ) as urlopen, mock.patch.object(audit.time, "sleep") as sleep:
+            with self.assertRaises(audit.RemoteApiError):
+                client.request(
+                    "https://youtrack.example.invalid/sync",
+                    method="POST",
+                    body={"mode": "permit"},
+                )
+
+        self.assertEqual(1, urlopen.call_count)
+        sleep.assert_not_called()
+
+    def test_retries_get_transport_failures_only_once(self):
+        client = audit.JsonHttpClient(timeout_seconds=5)
+        with mock.patch.object(
+            audit.urllib.request,
+            "urlopen",
+            side_effect=[
+                ConnectionResetError("first reset"),
+                ConnectionResetError("second reset"),
+            ],
+        ) as urlopen, mock.patch.object(audit.time, "sleep") as sleep:
+            with self.assertRaisesRegex(audit.RemoteApiError, "second reset"):
+                client.request("http://127.0.0.1:8181/api/v2")
+
+        self.assertEqual(2, urlopen.call_count)
+        sleep.assert_called_once_with(audit.TRANSIENT_GET_RETRY_DELAY_SECONDS)
+
     def test_normalizes_low_level_timeout_without_exposing_query_parameters(self):
         client = audit.JsonHttpClient(timeout_seconds=5)
         with mock.patch.object(
