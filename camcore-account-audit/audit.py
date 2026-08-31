@@ -32,6 +32,7 @@ NOTIFICATION_DEFERRED_ACTION = "member-notification-deferred"
 NOTIFICATION_BUDGET_EXHAUSTED_ACTION = "member-notification-budget-exhausted"
 TICKET_CREATED_AWAITING_NOTICE_ACTION = "ticket-created-awaiting-notice"
 TRANSIENT_GET_RETRY_DELAY_SECONDS = 1.0
+PERMIT_CONFLICT_RETRY_DELAYS_SECONDS = (0.25, 0.5, 1.0)
 NOTIFICATION_GATE_STATUSES = frozenset(
     {
         "reserved",
@@ -355,29 +356,34 @@ class YouTrackClient:
                 body=payload,
             )
 
-        try:
-            return submit()
-        except RemoteHttpError as exc:
-            # Two permit transactions can both preflight the same available
-            # AppGlobalStorage budget before YouTrack commits one and rejects
-            # the loser with its structured optimistic-conflict response. The
-            # committed transaction has already consumed the global 24-hour
-            # allowance, so one same-payload retry can only receive the
-            # determinate budget-exhausted receipt (or perform the sole allowed
-            # notification if the first transaction never committed).
+        for attempt in range(len(PERMIT_CONFLICT_RETRY_DELAYS_SECONDS) + 1):
             try:
-                error_payload = json.loads(exc.detail)
-            except json.JSONDecodeError:
-                error_payload = None
-            is_transaction_conflict = (
-                notification_mode == NOTIFICATION_MODE_PERMIT
-                and exc.status_code == 400
-                and isinstance(error_payload, dict)
-                and error_payload.get("error") == "Invalid properties"
-            )
-            if not is_transaction_conflict:
-                raise
-            return submit()
+                return submit()
+            except RemoteHttpError as exc:
+                # Two permit transactions can both preflight the same available
+                # AppGlobalStorage budget before YouTrack commits one and rejects
+                # the loser with its structured optimistic-conflict response.
+                # Give the winning commit time to become visible, then retry only
+                # this determinate permit conflict with the identical payload. A
+                # successful winner makes the retry return budget-exhausted; if
+                # the winner rolled back, one retry can safely reserve the sole
+                # permit. All other POST failures remain fail-closed.
+                try:
+                    error_payload = json.loads(exc.detail)
+                except json.JSONDecodeError:
+                    error_payload = None
+                is_transaction_conflict = (
+                    notification_mode == NOTIFICATION_MODE_PERMIT
+                    and exc.status_code == 400
+                    and isinstance(error_payload, dict)
+                    and error_payload.get("error") == "Invalid properties"
+                )
+                if (
+                    not is_transaction_conflict
+                    or attempt == len(PERMIT_CONFLICT_RETRY_DELAYS_SECONDS)
+                ):
+                    raise
+                time.sleep(PERMIT_CONFLICT_RETRY_DELAYS_SECONDS[attempt])
 
 
 class RegistryLock:
