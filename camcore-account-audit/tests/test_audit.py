@@ -67,6 +67,8 @@ def sync_receipt(
     budget_remaining=1,
     result=None,
     action=None,
+    onboarding_requested=False,
+    onboarding_completed=False,
 ):
     if result is None:
         result = "updated"
@@ -80,13 +82,21 @@ def sync_receipt(
         "memberNotificationPermitRequired": permit_required,
         "memberNotificationPermitReserved": permit_reserved,
         "memberNotificationBudgetRemaining": budget_remaining,
+        "onboardingRequested": onboarding_requested,
+        "onboardingCompleted": onboarding_completed,
         "plannedAction": planned_action,
         "result": result,
         "action": action,
     }
 
 
-def deferred_receipt(*, cycle_id, plex_user_id, planned_action):
+def deferred_receipt(
+    *,
+    cycle_id,
+    plex_user_id,
+    planned_action,
+    onboarding_requested=False,
+):
     return sync_receipt(
         notification_mode=audit.NOTIFICATION_MODE_SUPPRESS,
         cycle_id=cycle_id,
@@ -95,6 +105,7 @@ def deferred_receipt(*, cycle_id, plex_user_id, planned_action):
         permit_required=True,
         result="deferred",
         action=audit.NOTIFICATION_DEFERRED_ACTION,
+        onboarding_requested=onboarding_requested,
     )
 
 
@@ -107,6 +118,7 @@ def protocol_receipt(**overrides):
         "memberNotificationWindowSeconds": int(
             audit.MEMBER_NOTIFICATION_WINDOW.total_seconds()
         ),
+        "onboardingProtocolVersion": audit.ONBOARDING_PROTOCOL_VERSION,
     }
     receipt.update(overrides)
     return receipt
@@ -223,6 +235,7 @@ class YouTrackClientTests(unittest.TestCase):
         return audit.YouTrackClient(config(Path("registry.json")), http).sync(
             account(last_streamed=NOW - timedelta(days=60)),
             audit.Decision("Inactive", True, "inactive"),
+            onboarding_requested=False,
             notification_mode=notification_mode,
             cycle_id="audit-00000000000000000000000000000001",
         )
@@ -591,6 +604,33 @@ class RegistryTests(unittest.TestCase):
             self.assertIn("memberNotificationGate", saved)
             self.assertIn("42", saved["memberNotificationPermitHistory"])
 
+    def test_onboarding_baseline_never_backfills_existing_members(self):
+        registry = audit.Registry(Path("registry.json"))
+        existing = account(user_id="42", username="existing")
+
+        _, requested = registry.observe_account(existing, NOW)
+        self.assertFalse(requested)
+        registry.complete_onboarding_baseline(NOW, inventory_count=1)
+
+        _, requested = registry.observe_account(existing, NOW + timedelta(minutes=5))
+        self.assertFalse(requested)
+        newcomer = account(user_id="43", username="newcomer")
+        _, requested = registry.observe_account(newcomer, NOW + timedelta(minutes=5))
+        self.assertTrue(requested)
+        self.assertEqual(
+            "pending", registry.data["users"]["43"]["onboardingState"]
+        )
+
+        registry.confirm_onboarding(newcomer)
+        self.assertEqual(
+            "completed", registry.data["users"]["43"]["onboardingState"]
+        )
+
+    def test_onboarding_baseline_refuses_an_empty_inventory(self):
+        registry = audit.Registry(Path("registry.json"))
+        with self.assertRaisesRegex(audit.ConfigurationError, "empty.*baseline"):
+            registry.complete_onboarding_baseline(NOW, inventory_count=0)
+
     def test_notification_permit_is_reserved_for_a_full_twenty_four_hours(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "registry.json"
@@ -768,12 +808,13 @@ class RegistryLockTests(unittest.TestCase):
 class SyncReceiptTests(unittest.TestCase):
     CYCLE_ID = "audit-" + "a" * 32
 
-    def validate(self, response, mode):
+    def validate(self, response, mode, *, onboarding_requested=False):
         return audit.validate_sync_response(
             response,
             notification_mode=mode,
             cycle_id=self.CYCLE_ID,
             plex_user_id="42",
+            onboarding_requested=onboarding_requested,
         )
 
     def test_accepts_exact_suppress_and_permit_receipts(self):
@@ -854,6 +895,10 @@ class SyncReceiptTests(unittest.TestCase):
             lambda value: value.__setitem__("notificationMode", "permit"),
             lambda value: value.__setitem__("cycleId", "audit-" + "b" * 32),
             lambda value: value.__setitem__("plexUserId", "other"),
+            lambda value: value.pop("onboardingRequested"),
+            lambda value: value.__setitem__("onboardingRequested", True),
+            lambda value: value.pop("onboardingCompleted"),
+            lambda value: value.__setitem__("onboardingCompleted", "false"),
             lambda value: value.__setitem__(
                 "memberNotificationPermitRequired", "true"
             ),
@@ -911,6 +956,21 @@ class SyncReceiptTests(unittest.TestCase):
                 audit.NOTIFICATION_MODE_SUPPRESS,
             )
 
+        unsafe_completion = sync_receipt(
+            notification_mode=audit.NOTIFICATION_MODE_SUPPRESS,
+            cycle_id=self.CYCLE_ID,
+            plex_user_id="42",
+            result="planned",
+            onboarding_requested=True,
+            onboarding_completed=True,
+        )
+        with self.assertRaises(audit.RemoteApiError):
+            self.validate(
+                unsafe_completion,
+                audit.NOTIFICATION_MODE_SUPPRESS,
+                onboarding_requested=True,
+            )
+
 
 class ProtocolReceiptTests(unittest.TestCase):
     def test_accepts_only_the_exact_closed_protocol_receipt(self):
@@ -924,6 +984,9 @@ class ProtocolReceiptTests(unittest.TestCase):
             lambda value: value.__setitem__("notificationPolicyVersion", True),
             lambda value: value.__setitem__("notificationPolicyVersion", 1.0),
             lambda value: value.__setitem__("notificationModes", ["permit", "suppress"]),
+            lambda value: value.pop("onboardingProtocolVersion"),
+            lambda value: value.__setitem__("onboardingProtocolVersion", True),
+            lambda value: value.__setitem__("onboardingProtocolVersion", 2),
             lambda value: value.__setitem__("memberNotificationLimit", True),
             lambda value: value.__setitem__("memberNotificationLimit", 2),
             lambda value: value.__setitem__("memberNotificationWindowSeconds", 1.0),
@@ -1002,6 +1065,7 @@ class RunOnceTests(unittest.TestCase):
                 target,
                 decision,
                 *,
+                onboarding_requested,
                 notification_mode,
                 cycle_id,
             ):
@@ -1009,6 +1073,7 @@ class RunOnceTests(unittest.TestCase):
                     {
                         "account": target,
                         "decision": decision,
+                        "onboarding_requested": onboarding_requested,
                         "notification_mode": notification_mode,
                         "cycle_id": cycle_id,
                     }
@@ -1053,7 +1118,74 @@ class RunOnceTests(unittest.TestCase):
             self.assertEqual([], calls)
             saved = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(NOW.isoformat(), saved["lastCompletedAt"])
+            self.assertEqual(NOW.isoformat(), saved["onboardingBaselineCompletedAt"])
+            self.assertEqual("baseline", saved["users"]["42"]["onboardingState"])
             self.assertNotIn("memberNotificationGate", saved)
+
+    def test_new_member_is_onboarded_once_after_the_baseline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "users": {
+                            "42": {
+                                "firstSeenAt": (NOW - timedelta(days=30)).isoformat(),
+                                "lastSeenAt": NOW.isoformat(),
+                                "username": "existing",
+                                "onboardingState": "baseline",
+                            }
+                        },
+                        "memberNotificationPermitHistory": {},
+                        "onboardingBaselineCompletedAt": (
+                            NOW - timedelta(days=1)
+                        ).isoformat(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            newcomer = account(
+                user_id="43",
+                username="newcomer",
+                plays=0,
+                last_streamed=None,
+            )
+
+            def responder(target, _decision, mode, cycle_id):
+                if mode == audit.NOTIFICATION_MODE_SUPPRESS:
+                    return deferred_receipt(
+                        cycle_id=cycle_id,
+                        plex_user_id=target.user_id,
+                        planned_action=audit.ONBOARDING_TICKET_CREATED_ACTION,
+                        onboarding_requested=True,
+                    )
+                return sync_receipt(
+                    notification_mode=mode,
+                    cycle_id=cycle_id,
+                    plex_user_id=target.user_id,
+                    planned_action=audit.ONBOARDING_TICKET_CREATED_ACTION,
+                    permit_required=True,
+                    permit_reserved=True,
+                    budget_remaining=0,
+                    result="created",
+                    onboarding_requested=True,
+                    onboarding_completed=True,
+                )
+
+            exit_code, calls, _, stderr = self.run_worker(
+                accounts=[newcomer],
+                registry_path=path,
+                responder=responder,
+            )
+
+            self.assertEqual(0, exit_code, stderr)
+            self.assertEqual(2, len(calls))
+            self.assertTrue(all(call["onboarding_requested"] for call in calls))
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                "completed", saved["users"]["43"]["onboardingState"]
+            )
 
     def test_legacy_or_invalid_protocol_stops_before_account_enumeration(self):
         class MustNotEnumerate:

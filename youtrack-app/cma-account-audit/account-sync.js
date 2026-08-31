@@ -6,6 +6,7 @@ const MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
 const MEMBER_NOTIFICATION_WINDOW_MS = 24 * 60 * 60 * 1000;
 const NOTIFICATION_POLICY_VERSION = 1;
 const NOTIFICATION_PROTOCOL_ID = 'cma-account-audit-member-notification';
+const ONBOARDING_PROTOCOL_VERSION = 1;
 const NOTIFICATION_MODE_SUPPRESS = 'suppress';
 const NOTIFICATION_MODE_PERMIT = 'permit';
 const NOTIFICATION_DEFERRED_ACTION = 'member-notification-deferred';
@@ -13,6 +14,8 @@ const NOTIFICATION_BUDGET_EXHAUSTED_ACTION =
   'member-notification-budget-exhausted';
 const TICKET_CREATED_AWAITING_NOTICE_ACTION =
   'ticket-created-awaiting-notice';
+const ONBOARDING_TICKET_CREATED_ACTION = 'onboarding-ticket-created';
+const ONBOARDING_EXISTING_TICKET_ACTION = 'onboarding-existing-ticket';
 const CYCLE_ID_PATTERN = /^audit-[0-9a-f]{32}$/;
 const ACCOUNT_STATUSES = ['Active', 'Inactive', 'Never Used'];
 const REVIEW_STAGES_IN_PROGRESS = [
@@ -75,12 +78,16 @@ function validatePayload(payload, now) {
     watchTime: requiredString(payload, 'watchTime'),
     accountStatus: requiredString(payload, 'accountStatus'),
     reviewNeeded: payload.reviewNeeded,
+    onboardingRequested: payload.onboardingRequested,
     notificationMode: requiredString(payload, 'notificationMode'),
     cycleId: requiredString(payload, 'cycleId')
   };
 
   if (typeof body.reviewNeeded !== 'boolean') {
     throw new Error('reviewNeeded must be a boolean');
+  }
+  if (typeof body.onboardingRequested !== 'boolean') {
+    throw new Error('onboardingRequested must be a boolean');
   }
   if (body.totalPlays === null || body.watchSeconds === null) {
     throw new Error('totalPlays and watchSeconds must be non-negative safe integers');
@@ -247,8 +254,38 @@ function buildDescription(body) {
   ].join('\n');
 }
 
+function buildOnboardingDescription(body) {
+  return [
+    '## Welcome to Cameron-Media',
+    '',
+    'Hi ' + body.plexUsername + ',',
+    '',
+    'Your Cameron-Media access is ready. Sign in with the same Plex account that received the library invitation.',
+    '',
+    '### Get started',
+    '',
+    '1. Accept the Plex library invitation if it is still waiting in your inbox.',
+    '2. Open the [Plex Web App](https://app.plex.tv/desktop/) and select Cameron-Media from the sidebar.',
+    '3. Install a Plex player for your TV, phone, tablet or computer from [Plex Apps & Devices](https://www.plex.tv/apps-devices/).',
+    '4. Pin the Cameron-Media libraries you use most so they stay easy to find.',
+    '',
+    '### Need help?',
+    '',
+    'Reply to this ticket or email help@camcore.au and include the device you are using plus a screenshot of any error.',
+    '',
+    'Enjoy Cameron-Media!'
+  ].join('\n');
+}
+
 function planReviewDecision(issue, body, previousAccountStatus) {
   const currentStage = issue ? stageName(issue) : null;
+
+  if (body.onboardingRequested) {
+    if (issue) {
+      return {action: ONBOARDING_EXISTING_TICKET_ACTION, targetStage: null};
+    }
+    return {action: ONBOARDING_TICKET_CREATED_ACTION, targetStage: 'Active'};
+  }
 
   if (!issue) {
     // Creating a Helpdesk ticket can notify its reporter. Keep the public
@@ -294,6 +331,9 @@ function planReviewDecision(issue, body, previousAccountStatus) {
 }
 
 function isMemberNotificationCandidate(issue, plan) {
+  if (plan.action === ONBOARDING_TICKET_CREATED_ACTION) {
+    return true;
+  }
   if (plan.action === TICKET_CREATED_AWAITING_NOTICE_ACTION) {
     return true;
   }
@@ -336,14 +376,22 @@ function reserveNotificationBudget(budget, body, now) {
   budget.remaining = 0;
 }
 
-function receipt(body, permitRequired, permitReserved, budgetRemaining) {
+function receipt(
+  body,
+  permitRequired,
+  permitReserved,
+  budgetRemaining,
+  onboardingCompleted
+) {
   return {
     notificationPolicyVersion: NOTIFICATION_POLICY_VERSION,
     notificationMode: body.notificationMode,
     cycleId: body.cycleId,
     memberNotificationPermitRequired: permitRequired,
     memberNotificationPermitReserved: permitReserved,
-    memberNotificationBudgetRemaining: budgetRemaining
+    memberNotificationBudgetRemaining: budgetRemaining,
+    onboardingRequested: body.onboardingRequested,
+    onboardingCompleted: onboardingCompleted
   };
 }
 
@@ -353,7 +401,8 @@ function protocolReceipt() {
     notificationPolicyVersion: NOTIFICATION_POLICY_VERSION,
     notificationModes: [NOTIFICATION_MODE_SUPPRESS, NOTIFICATION_MODE_PERMIT],
     memberNotificationLimit: 1,
-    memberNotificationWindowSeconds: MEMBER_NOTIFICATION_WINDOW_MS / 1000
+    memberNotificationWindowSeconds: MEMBER_NOTIFICATION_WINDOW_MS / 1000,
+    onboardingProtocolVersion: ONBOARDING_PROTOCOL_VERSION
   };
 }
 
@@ -365,7 +414,7 @@ function deferredResponse(body, issue, plan, action, budgetRemaining) {
     issueId: issue ? issue.id : null,
     reviewStage: issue ? stageName(issue) : null,
     plexUserId: body.plexUserId
-  }, receipt(body, true, false, budgetRemaining));
+  }, receipt(body, true, false, budgetRemaining, false));
 }
 
 function plannedResponse(body, issue, plan, budgetRemaining) {
@@ -376,7 +425,13 @@ function plannedResponse(body, issue, plan, budgetRemaining) {
     issueId: issue ? issue.id : null,
     reviewStage: issue ? stageName(issue) : null,
     plexUserId: body.plexUserId
-  }, receipt(body, false, false, budgetRemaining));
+  }, receipt(
+    body,
+    false,
+    false,
+    budgetRemaining,
+    body.onboardingRequested && plan.action === ONBOARDING_EXISTING_TICKET_ACTION
+  ));
 }
 
 function preflightMutation(project, body, plan) {
@@ -455,7 +510,7 @@ exports.httpHandler = {
           return;
         }
 
-        if (!issue && !body.reviewNeeded) {
+        if (!issue && !body.reviewNeeded && !body.onboardingRequested) {
           ctx.response.json(plannedResponse(
             body,
             null,
@@ -543,9 +598,13 @@ exports.httpHandler = {
           issue = new entities.Issue(
             reporter,
             ctx.project,
-            'Account Review — ' + body.plexUsername
+            plan.action === ONBOARDING_TICKET_CREATED_ACTION ?
+              'Welcome to Cameron-Media — ' + body.plexUsername :
+              'Account Review — ' + body.plexUsername
           );
-          issue.description = buildDescription(body);
+          issue.description = plan.action === ONBOARDING_TICKET_CREATED_ACTION ?
+            buildOnboardingDescription(body) :
+            buildDescription(body);
         }
 
         // Keep every write in the request transaction. Mutation exceptions must
@@ -563,7 +622,15 @@ exports.httpHandler = {
           issueId: issue.id,
           reviewStage: stageName(issue),
           plexUserId: body.plexUserId
-        }, receipt(body, permitRequired, permitReserved, budget.remaining)));
+        }, receipt(
+          body,
+          permitRequired,
+          permitReserved,
+          budget.remaining,
+          body.onboardingRequested &&
+            (plan.action === ONBOARDING_TICKET_CREATED_ACTION ||
+             plan.action === ONBOARDING_EXISTING_TICKET_ACTION)
+        )));
       }
     },
     {

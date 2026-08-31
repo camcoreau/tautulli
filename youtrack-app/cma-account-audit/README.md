@@ -10,6 +10,13 @@ It uses the stable `Plex User ID` to update the same account ticket on every
 daily audit. Exact `Plex Username` matching is a one-time fallback that lets the
 first run backfill IDs onto tickets that predate the integration.
 
+When the worker sets `onboardingRequested=true`, the app plans one
+`Welcome to Cameron-Media — <username>` ticket at the non-message `Active`
+stage. Its description is a member-facing welcome guide with links to the Plex
+Web App, Plex player apps and CamCore help. A retry that finds the same lifetime
+CMA ticket returns `onboarding-existing-ticket` without writing or sending a
+second notification.
+
 New tickets are constructed with the unique YouTrack user whose email matches the
 Plex email. This preserves the Helpdesk reporter relationship so public comments
 continue to reach the member. A missing or ambiguous reporter returns HTTP 422;
@@ -44,10 +51,13 @@ must validate that exact receipt before they enumerate Tautulli accounts or send
 any `sync-account` request. Version 1.1 has no protocol endpoint, so deploying a
 new live worker before this in-place app update fails before ticket mutations.
 
-Protocol version 1 requires every request to include one audit `cycleId` and a
+The protocol also advertises onboarding protocol version 1. Protocol version 1
+requires every request to include one audit `cycleId`, an
+`onboardingRequested` boolean and a
 `notificationMode` of either `suppress` or `permit`. Every successful response
 echoes the policy version, mode, cycle ID and Plex user ID, and includes
-`plannedAction`, `memberNotificationPermitRequired`,
+`plannedAction`, `onboardingRequested`, `onboardingCompleted`,
+`memberNotificationPermitRequired`,
 `memberNotificationPermitReserved` and
 `memberNotificationBudgetRemaining`. The worker rejects missing, incompatible
 or contradictory receipts.
