@@ -231,6 +231,27 @@ class YouTrackClientTests(unittest.TestCase):
             detail='{"error":"Invalid properties"}',
         )
 
+    @staticmethod
+    def current_conflict():
+        detail = json.dumps(
+            {
+                "error": "invalid_properties",
+                "error_description": "PluggedStringAttribute is not unique.",
+                "error_children": [
+                    {
+                        "error": "PluggedStringAttribute-is-invalid",
+                        "error_description": "PluggedStringAttribute is not unique.",
+                        "error_developer_message": "Value should be unique",
+                    }
+                ],
+            }
+        )
+        return audit.RemoteHttpError(
+            f"POST sync-account returned HTTP 400: {detail}",
+            status_code=400,
+            detail=detail,
+        )
+
     def sync(self, http, notification_mode):
         return audit.YouTrackClient(config(Path("registry.json")), http).sync(
             account(last_streamed=NOW - timedelta(days=60)),
@@ -242,6 +263,20 @@ class YouTrackClientTests(unittest.TestCase):
 
     def test_permit_retries_one_structured_youtrack_transaction_conflict(self):
         http = self.RecordingHttp([self.conflict()])
+
+        with mock.patch.object(audit.time, "sleep") as sleep:
+            self.assertEqual(
+                {"result": "deferred"},
+                self.sync(http, audit.NOTIFICATION_MODE_PERMIT),
+            )
+        self.assertEqual(2, len(http.calls))
+        self.assertEqual(http.calls[0], http.calls[1])
+        sleep.assert_called_once_with(
+            audit.PERMIT_CONFLICT_RETRY_DELAYS_SECONDS[0]
+        )
+
+    def test_permit_retries_current_youtrack_unique_property_conflict(self):
+        http = self.RecordingHttp([self.current_conflict()])
 
         with mock.patch.object(audit.time, "sleep") as sleep:
             self.assertEqual(
@@ -268,6 +303,31 @@ class YouTrackClientTests(unittest.TestCase):
             'POST sync-account returned HTTP 400: {"error":"Bad Request"}',
             status_code=400,
             detail='{"error":"Bad Request"}',
+        )
+        http = self.RecordingHttp([error])
+
+        with mock.patch.object(audit.time, "sleep") as sleep:
+            with self.assertRaises(audit.RemoteHttpError):
+                self.sync(http, audit.NOTIFICATION_MODE_PERMIT)
+        self.assertEqual(1, len(http.calls))
+        sleep.assert_not_called()
+
+    def test_permit_does_not_retry_unrelated_invalid_properties_response(self):
+        detail = json.dumps(
+            {
+                "error": "invalid_properties",
+                "error_children": [
+                    {
+                        "error": "AnotherAttribute-is-invalid",
+                        "error_developer_message": "Value is invalid",
+                    }
+                ],
+            }
+        )
+        error = audit.RemoteHttpError(
+            f"POST sync-account returned HTTP 400: {detail}",
+            status_code=400,
+            detail=detail,
         )
         http = self.RecordingHttp([error])
 
@@ -1696,3 +1756,4 @@ class RunOnceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
