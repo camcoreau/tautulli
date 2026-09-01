@@ -82,6 +82,24 @@ class RemoteHttpError(RemoteApiError):
         self.detail = detail
 
 
+def is_youtrack_transaction_conflict(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("error") == "Invalid properties":
+        return True
+    if payload.get("error") != "invalid_properties":
+        return False
+    children = payload.get("error_children")
+    if not isinstance(children, list):
+        return False
+    return any(
+        isinstance(child, dict)
+        and child.get("error") == "PluggedStringAttribute-is-invalid"
+        and child.get("error_developer_message") == "Value should be unique"
+        for child in children
+    )
+
+
 def utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -383,8 +401,7 @@ class YouTrackClient:
                 is_transaction_conflict = (
                     notification_mode == NOTIFICATION_MODE_PERMIT
                     and exc.status_code == 400
-                    and isinstance(error_payload, dict)
-                    and error_payload.get("error") == "Invalid properties"
+                    and is_youtrack_transaction_conflict(error_payload)
                 )
                 if (
                     not is_transaction_conflict
