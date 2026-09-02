@@ -1114,8 +1114,6 @@ class RunOnceTests(unittest.TestCase):
                 pass
 
             def protocol(self):
-                if dry_run:
-                    raise AssertionError("Dry-run must not call the protocol endpoint")
                 if isinstance(protocol_response, BaseException):
                     raise protocol_response
                 return protocol_receipt() if protocol_response is None else protocol_response
@@ -1165,21 +1163,77 @@ class RunOnceTests(unittest.TestCase):
             last_streamed=NOW - timedelta(days=60),
         )
 
-    def test_dry_run_never_calls_youtrack_or_reserves_a_permit(self):
+    def test_dry_run_uses_read_only_preview_without_reserving_a_permit(self):
+        def responder(target, _decision, mode, cycle_id):
+            self.assertEqual(audit.NOTIFICATION_MODE_SUPPRESS, mode)
+            return deferred_receipt(
+                cycle_id=cycle_id,
+                plex_user_id=target.user_id,
+                planned_action="notice-started",
+            )
+
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "registry.json"
-            exit_code, calls, _, _ = self.run_worker(
+            exit_code, calls, stdout, stderr = self.run_worker(
                 accounts=[self.inactive_account(username="member", user_id="42")],
                 registry_path=path,
                 dry_run=True,
+                responder=responder,
             )
 
-            self.assertEqual(0, exit_code)
-            self.assertEqual([], calls)
+            self.assertEqual(0, exit_code, stderr)
+            self.assertEqual(
+                [audit.NOTIFICATION_MODE_SUPPRESS],
+                [item["notification_mode"] for item in calls],
+            )
+            self.assertIn('"notificationCandidates": 1', stdout)
+            self.assertIn('"notificationPermitStatus": "dry-run-preview"', stdout)
+            self.assertNotIn('"youtrackPermit"', stdout)
             saved = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(NOW.isoformat(), saved["lastCompletedAt"])
             self.assertEqual(NOW.isoformat(), saved["onboardingBaselineCompletedAt"])
             self.assertEqual("baseline", saved["users"]["42"]["onboardingState"])
+            self.assertNotIn("memberNotificationGate", saved)
+
+    def test_dry_run_preview_error_blocks_completion_and_never_permits(self):
+        old_completed = (NOW - timedelta(days=1)).isoformat()
+
+        def responder(_target, _decision, mode, _cycle_id):
+            self.assertEqual(audit.NOTIFICATION_MODE_SUPPRESS, mode)
+            raise audit.RemoteApiError("preview failed")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "users": {},
+                        "lastCompletedAt": old_completed,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            exit_code, calls, stdout, stderr = self.run_worker(
+                accounts=[self.inactive_account(username="member", user_id="42")],
+                registry_path=path,
+                dry_run=True,
+                responder=responder,
+            )
+
+            self.assertEqual(1, exit_code)
+            self.assertEqual(
+                [audit.NOTIFICATION_MODE_SUPPRESS],
+                [item["notification_mode"] for item in calls],
+            )
+            self.assertIn('"phase": "suppress"', stderr)
+            self.assertIn('"notificationCandidates": 0', stdout)
+            self.assertIn(
+                '"notificationPermitStatus": "blocked-by-suppress-errors"',
+                stdout,
+            )
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(old_completed, saved["lastCompletedAt"])
             self.assertNotIn("memberNotificationGate", saved)
 
     def test_new_member_is_onboarded_once_after_the_baseline(self):

@@ -42,13 +42,15 @@ user as the onboarding baseline. It never creates welcome tickets for that
 initial inventory. Only a Plex user ID first observed after the durable
 `onboardingBaselineCompletedAt` marker exists is marked `pending`.
 
-Dry-run establishes the same local baseline without contacting YouTrack. A
-pending onboarding remains pending across restarts and dry-runs until the app
-returns a determinate receipt proving either that the welcome ticket was created
-or that the lifetime CMA ticket already exists. An ambiguous response never
-marks onboarding complete. Refusing to establish an empty baseline prevents a
-temporary empty Tautulli inventory from turning every returning member into a
-new-member candidate.
+Dry-run establishes the same local baseline and contacts only YouTrack's
+read-only `protocol` and `suppress` endpoints. It never calls `permit`, reserves
+a notification budget, changes a ticket or contacts a member. A pending
+onboarding remains pending across restarts and dry-runs until a determinate
+receipt proves either that the welcome ticket was created or that the lifetime
+CMA ticket already exists. An ambiguous response never marks onboarding
+complete. Refusing to establish an empty baseline prevents a temporary empty
+Tautulli inventory from turning every returning member into a new-member
+candidate.
 
 Welcome-ticket creation still uses the existing one-per-24-hour member-
 notification gate because creating a Helpdesk ticket can email its reporter.
@@ -59,9 +61,10 @@ cycles; it does not bypass or weaken the existing notification safety policy.
 
 Live audit cycles use a fail-closed, two-pass protocol so the account-audit
 system can permit no more than one member-visible notification in any rolling
-24-hour window:
+24-hour window. Dry-run executes the same protocol handshake and first,
+read-only planning pass, then stops before permit selection:
 
-1. Before it reads the Tautulli account inventory, the live worker calls the
+1. Before it reads the Tautulli account inventory, every worker calls the
    app's read-only `protocol` endpoint and requires the exact reviewed policy,
    modes, one-notification limit and 24-hour window. The legacy app has no such
    endpoint, so a wrong-order worker deployment stops before any account sync
@@ -97,8 +100,8 @@ bypassing the cap. Persisting the local reservation before the permit request
 means a timeout or ambiguous response consumes the local window instead of
 risking a duplicate notification.
 
-Live mode completes its protocol handshake first. Every live or dry-run cycle
-then acquires an exclusive, non-blocking process lock beside its selected
+Every live or dry-run cycle completes its protocol handshake first, then
+acquires an exclusive, non-blocking process lock beside its selected
 registry (for example, `/data/registry.json.lock`). The lock is held from
 registry load through Tautulli enumeration, all YouTrack requests and the final
 registry save. A second worker that targets the same registry fails before
@@ -170,7 +173,9 @@ Do not grant the account access to Support or Operations.
    image tag published by the release workflow.
 4. Preserve the live registry, clone it to the isolated dry-run registry and
    deploy the new immutable image with `DRY_RUN=true`. Confirm the JSON decisions
-   and projected review set in logs without contacting YouTrack or members.
+   and projected review set from the read-only YouTrack suppress pass. Dry-run
+   must report `notificationPermitStatus=dry-run-preview`; it cannot call permit,
+   mutate a ticket or contact a member.
 5. Validate the new app protocol with a staff-only canary. Change to
    `DRY_RUN=false` and `/data/registry.json` only after the canary and fresh
    projection pass the one-notification gate and confirm the baseline contains
