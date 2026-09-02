@@ -82,6 +82,30 @@ class RemoteHttpError(RemoteApiError):
         self.detail = detail
 
 
+DETERMINISTIC_IDENTITY_REJECTIONS = {
+    (400, "email must be a non-empty string"): "email-unavailable",
+    (
+        422,
+        "No unique YouTrack Helpdesk reporter matches the Plex email address",
+    ): "reporter-match-unavailable",
+}
+
+
+def deterministic_identity_skip_reason(exc: RemoteApiError) -> str | None:
+    if not isinstance(exc, RemoteHttpError):
+        return None
+    try:
+        payload = json.loads(exc.detail)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or set(payload) != {"error"}:
+        return None
+    message = payload.get("error")
+    if not isinstance(message, str):
+        return None
+    return DETERMINISTIC_IDENTITY_REJECTIONS.get((exc.status_code, message))
+
+
 def is_youtrack_transaction_conflict(payload: Any) -> bool:
     if not isinstance(payload, dict):
         return False
@@ -1157,6 +1181,11 @@ def _run_once_locked(
                 candidates.append({**entry, "suppress": response})
             processed += 1
         except RemoteApiError as exc:
+            skip_reason = deterministic_identity_skip_reason(exc)
+            if skip_reason is not None:
+                event["youtrackSuppressSkipped"] = skip_reason
+                processed += 1
+                continue
             errors += 1
             print(
                 json.dumps(
