@@ -186,9 +186,9 @@ class Config:
             missing.append("TAUTULLI_URL")
         if not tautulli_api_key:
             missing.append("TAUTULLI_API_KEY")
-        if not dry_run and not sync_url:
+        if not sync_url:
             missing.append("YOUTRACK_URL or YOUTRACK_SYNC_URL")
-        if not dry_run and not youtrack_token:
+        if not youtrack_token:
             missing.append("YOUTRACK_TOKEN")
         if missing:
             raise ConfigurationError("Missing required settings: " + ", ".join(missing))
@@ -1073,11 +1073,11 @@ def run_once(config: Config, observed_at: datetime | None = None) -> int:
     tautulli = TautulliClient(config, http)
     youtrack = YouTrackClient(config, http)
     registry = Registry(config.registry_path)
-    if not config.dry_run:
-        # This read-only endpoint does not exist in the legacy app. Prove exact
-        # suppress/permit compatibility before enumerating accounts or sending
-        # any mutation-capable account request.
-        validate_protocol_response(youtrack.protocol())
+    # This read-only endpoint does not exist in the legacy app. Prove exact
+    # suppress/permit compatibility before enumerating accounts. Dry-run uses
+    # the same handshake and read-only suppress pass as live mode so its
+    # projected notification set cannot diverge from the production planner.
+    validate_protocol_response(youtrack.protocol())
     # Serialize the entire registry and remote-sync cycle. A second process
     # fails immediately instead of reading a stale gate or racing a reservation.
     with RegistryLock(config.registry_path):
@@ -1132,27 +1132,6 @@ def _run_once_locked(
         inventory_count=len(entries),
     )
 
-    if config.dry_run:
-        for entry in entries:
-            print(json.dumps(entry["event"], sort_keys=True))
-            processed += 1
-        registry.data["lastCompletedAt"] = observed_at.isoformat()
-        registry.save()
-        print(
-            json.dumps(
-                {
-                    "event": "complete",
-                    "processed": processed,
-                    "excluded": excluded,
-                    "errors": errors,
-                    "notificationCandidates": 0,
-                    "notificationPermitStatus": "dry-run",
-                },
-                sort_keys=True,
-            )
-        )
-        return 0
-
     candidates: list[dict[str, Any]] = []
     for entry in entries:
         account = entry["account"]
@@ -1198,6 +1177,31 @@ def _run_once_locked(
                 ),
                 file=sys.stderr,
             )
+
+    if config.dry_run:
+        for entry in entries:
+            print(json.dumps(entry["event"], sort_keys=True))
+        if errors == 0:
+            registry.data["lastCompletedAt"] = observed_at.isoformat()
+        registry.save()
+        print(
+            json.dumps(
+                {
+                    "event": "complete",
+                    "processed": processed,
+                    "excluded": excluded,
+                    "errors": errors,
+                    "notificationCandidates": len(candidates),
+                    "notificationPermitStatus": (
+                        "dry-run-preview"
+                        if errors == 0
+                        else "blocked-by-suppress-errors"
+                    ),
+                },
+                sort_keys=True,
+            )
+        )
+        return 1 if errors else 0
 
     permit_status = "not-needed"
     if candidates:
