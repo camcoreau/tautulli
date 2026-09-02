@@ -1524,6 +1524,101 @@ class RunOnceTests(unittest.TestCase):
             self.assertEqual(old_completed, saved["lastCompletedAt"])
             self.assertNotIn("memberNotificationGate", saved)
 
+    def test_deterministic_identity_rejections_skip_only_affected_accounts(self):
+        accounts = [
+            self.inactive_account(username="missing-email", user_id="1"),
+            self.inactive_account(username="missing-reporter", user_id="2"),
+        ]
+        rejections = {
+            "1": (400, "email must be a non-empty string"),
+            "2": (
+                422,
+                "No unique YouTrack Helpdesk reporter matches the Plex email address",
+            ),
+        }
+
+        def responder(target, _decision, mode, _cycle_id):
+            self.assertEqual(audit.NOTIFICATION_MODE_SUPPRESS, mode)
+            status_code, message = rejections[target.user_id]
+            detail = json.dumps({"error": message})
+            raise audit.RemoteHttpError(
+                f"POST sync-account returned HTTP {status_code}: {detail}",
+                status_code=status_code,
+                detail=detail,
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            exit_code, calls, stdout, stderr = self.run_worker(
+                accounts=accounts,
+                registry_path=path,
+                responder=responder,
+            )
+
+            self.assertEqual(0, exit_code, stderr)
+            self.assertEqual(2, len(calls))
+            self.assertTrue(
+                all(
+                    call["notification_mode"] == audit.NOTIFICATION_MODE_SUPPRESS
+                    for call in calls
+                )
+            )
+            self.assertEqual("", stderr)
+            self.assertIn('"youtrackSuppressSkipped": "email-unavailable"', stdout)
+            self.assertIn(
+                '"youtrackSuppressSkipped": "reporter-match-unavailable"',
+                stdout,
+            )
+            self.assertIn('"errors": 0', stdout)
+            self.assertIn('"notificationCandidates": 0', stdout)
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(NOW.isoformat(), saved["lastCompletedAt"])
+            self.assertNotIn("memberNotificationGate", saved)
+
+    def test_identity_rejection_near_miss_still_blocks_all_permits(self):
+        accounts = [
+            self.inactive_account(username="candidate", user_id="1"),
+            self.inactive_account(username="unsafe", user_id="2"),
+        ]
+
+        def responder(target, _decision, mode, cycle_id):
+            self.assertEqual(audit.NOTIFICATION_MODE_SUPPRESS, mode)
+            if target.user_id == "1":
+                return deferred_receipt(
+                    cycle_id=cycle_id,
+                    plex_user_id=target.user_id,
+                    planned_action="notice-started",
+                )
+            detail = json.dumps(
+                {
+                    "error": "email must be a non-empty string",
+                    "unexpected": True,
+                }
+            )
+            raise audit.RemoteHttpError(
+                f"POST sync-account returned HTTP 400: {detail}",
+                status_code=400,
+                detail=detail,
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            exit_code, calls, _, stderr = self.run_worker(
+                accounts=accounts,
+                registry_path=path,
+                responder=responder,
+            )
+
+            self.assertEqual(1, exit_code)
+            self.assertEqual(
+                ["suppress", "suppress"],
+                [item["notification_mode"] for item in calls],
+            )
+            self.assertIn('"phase": "suppress"', stderr)
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertNotIn("lastCompletedAt", saved)
+            self.assertNotIn("memberNotificationGate", saved)
+
     def test_ambiguous_permit_failure_stays_reserved_and_is_not_retried(self):
         target = self.inactive_account(username="alpha", user_id="1")
 
