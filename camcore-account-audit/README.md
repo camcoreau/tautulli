@@ -138,15 +138,18 @@ ambiguous YouTrack write cannot be duplicated; the permit-only optimistic
 conflict handling above remains the sole reviewed write retry and always reuses
 the exact validated payload and cycle ID.
 
-Dry-run mode makes no YouTrack calls and neither reads nor reserves a remote
-permit. It records only the local account classification and completion state in
-the selected isolated registry.
+Dry-run mode requires the CMA YouTrack app, URL and project-scoped token. It
+performs the same read-only `protocol` handshake and `suppress` planning pass as
+live mode, then stops before permit selection. It never calls `permit`, reserves
+a notification budget, mutates a ticket or contacts a member. It records the
+local account classification, completion state and projected notification set
+in the selected isolated registry.
 
 ## Required YouTrack app
 
 Install and attach `youtrack-app/cma-account-audit` to the CMA project before
-turning off dry-run mode. Its project-scoped endpoint creates tickets using the
-existing Helpdesk reporter account that matches the Plex email address. It
+running either dry-run or live mode. Its project-scoped endpoint creates tickets
+using the existing Helpdesk reporter account that matches the Plex email address. It
 returns HTTP 422 rather than creating a ticket under the automation identity when
 there is no unique reporter match.
 
