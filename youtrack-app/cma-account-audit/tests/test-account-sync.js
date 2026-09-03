@@ -1060,9 +1060,17 @@ function testNewMemberOnboardingCreatesOneWelcomeTicketAndRetriesIdempotently() 
   });
   assert.strictEqual(runtime.created.length, 1);
   const welcome = runtime.created[0];
-  assert.strictEqual(welcome.summary, 'Welcome to Cameron-Media — member');
+  assert.strictEqual(
+    welcome.summary,
+    'Welcome to Cameron-Media — Your access is ready'
+  );
   assert.match(welcome.description, /https:\/\/app\.plex\.tv\/desktop\//);
   assert.match(welcome.description, /https:\/\/www\.plex\.tv\/apps-devices\//);
+  assert.ok(welcome.description.includes('https://camcore.au'));
+  assert.ok(welcome.description.includes('https://requests.camcore.au'));
+  assert.ok(welcome.description.includes('https://status.camcore.au'));
+  assert.ok(welcome.description.includes('provided as part of **CamCore**'));
+  assert.ok(welcome.description.includes('**CamCore Operations**'));
   assert.match(welcome.description, /help@camcore\.au/);
   assert.strictEqual(welcome.fields['Review Stage'].name, 'Active');
   assert.strictEqual(welcome.fields['Account Audit Confirmed At'], runtime.now);

@@ -260,20 +260,51 @@ function buildOnboardingDescription(body) {
     '',
     'Hi ' + body.plexUsername + ',',
     '',
-    'Your Cameron-Media access is ready. Sign in with the same Plex account that received the library invitation.',
+    'Welcome to **Cameron-Media**, the media streaming service provided as part of **CamCore**.',
+    '',
+    'CamCore provides the services, support and infrastructure behind Cameron-Media, while Cameron-Media is where you access your shared movies, TV shows and other media through Plex.',
+    '',
+    'Your Cameron-Media access is now ready. Sign in using the same Plex account that received your library invitation.',
     '',
     '### Get started',
     '',
-    '1. Accept the Plex library invitation if it is still waiting in your inbox.',
-    '2. Open the [Plex Web App](https://app.plex.tv/desktop/) and select Cameron-Media from the sidebar.',
-    '3. Install a Plex player for your TV, phone, tablet or computer from [Plex Apps & Devices](https://www.plex.tv/apps-devices/).',
-    '4. Pin the Cameron-Media libraries you use most so they stay easy to find.',
+    '1. **Accept your Plex invitation**',
+    '   If you have not already, accept the Cameron-Media library invitation sent by Plex.',
+    '',
+    '2. **Open Cameron-Media**',
+    '   Open the [Plex Web App](https://app.plex.tv/desktop/) or install Plex for your TV, phone, tablet or computer from [Plex Apps & Devices](https://www.plex.tv/apps-devices/).',
+    '',
+    '3. **Find your libraries**',
+    '   Select **Cameron-Media** in Plex and pin the libraries you use most so they stay easy to find.',
+    '',
+    '### Your CamCore services',
+    '',
+    '**Cameron-Media**',
+    'Your Plex-based media service for movies, TV shows and other shared content.',
+    '',
+    '**CamCore** — [camcore.au](https://camcore.au)',
+    'The main website for CamCore and its services.',
+    '',
+    '**Media Requests** — [requests.camcore.au](https://requests.camcore.au)',
+    'Request movies and TV shows you would like added to Cameron-Media.',
+    '',
+    '**Service Status** — [status.camcore.au](https://status.camcore.au)',
+    'Check current service availability, planned maintenance and known outages affecting Cameron-Media or other CamCore services.',
     '',
     '### Need help?',
     '',
-    'Reply to this ticket or email help@camcore.au and include the device you are using plus a screenshot of any error.',
+    'Reply directly to this ticket or email **help@camcore.au**.',
     '',
-    'Enjoy Cameron-Media!'
+    'When reporting a problem, please include:',
+    '',
+    '- the device you are using;',
+    '- what you were trying to do;',
+    '- any error message you received; and',
+    '- a screenshot where possible.',
+    '',
+    'Enjoy Cameron-Media!',
+    '',
+    '**CamCore Operations**'
   ].join('\n');
 }
 
@@ -599,7 +630,7 @@ exports.httpHandler = {
             reporter,
             ctx.project,
             plan.action === ONBOARDING_TICKET_CREATED_ACTION ?
-              'Welcome to Cameron-Media — ' + body.plexUsername :
+              'Welcome to Cameron-Media — Your access is ready' :
               'Account Review — ' + body.plexUsername
           );
           issue.description = plan.action === ONBOARDING_TICKET_CREATED_ACTION ?
