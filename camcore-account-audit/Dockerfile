@@ -6,15 +6,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY audit.py /app/audit.py
+COPY runner.py /app/runner.py
 
 RUN addgroup -S -g 10001 audit \
     && adduser -S -D -H -u 10001 -G audit audit \
     && mkdir -p /data \
     && chown audit:audit /data \
-    && python -m py_compile /app/audit.py
+    && python -m py_compile /app/audit.py /app/runner.py
 
 USER 10001:10001
 
 VOLUME ["/data"]
 
-ENTRYPOINT ["python", "/app/audit.py"]
+ENTRYPOINT ["python", "/app/runner.py"]
