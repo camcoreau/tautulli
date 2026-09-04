@@ -473,14 +473,16 @@ function preflightMutation(project, body, plan) {
     'Total Plays',
     'Watch Time',
     'Account Audit Confirmed At',
-    'Review Stage'
+    'Review Stage',
+    'State'
   ].forEach(function(fieldName) {
     projectField(project, fieldName);
   });
 
   const values = {
     accountStatus: projectValue(project, 'Account Status', body.accountStatus),
-    reviewStage: null
+    reviewStage: null,
+    solvedState: projectValue(project, 'State', 'Solved')
   };
   if (plan.targetStage) {
     values.reviewStage = projectValue(project, 'Review Stage', plan.targetStage);
@@ -500,6 +502,12 @@ function applyFacts(issue, body, values) {
 function applyReviewDecision(issue, plan, values) {
   if (plan.targetStage) {
     issue.fields['Review Stage'] = values.reviewStage;
+  }
+  // The welcome ticket's creation email is the only onboarding message. Solve
+  // it immediately so the normal Helpdesk queue stays quiet until a later
+  // inactivity transition or a reporter reply reopens the lifecycle.
+  if (plan.action === ONBOARDING_TICKET_CREATED_ACTION) {
+    issue.fields.State = values.solvedState;
   }
 }
 

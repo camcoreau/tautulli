@@ -108,6 +108,7 @@ Module._load = originalLoad;
 
 const bundles = {
   'Account Status': ['Active', 'Inactive', 'Never Used'],
+  State: ['New', 'Open', 'Pending', 'Solved'],
   'Review Stage': [
     'Active',
     'Inactivity Notice',
@@ -1073,6 +1074,7 @@ function testNewMemberOnboardingCreatesOneWelcomeTicketAndRetriesIdempotently() 
   assert.ok(welcome.description.includes('**CamCore Operations**'));
   assert.match(welcome.description, /help@camcore\.au/);
   assert.strictEqual(welcome.fields['Review Stage'].name, 'Active');
+  assert.strictEqual(welcome.fields.State.name, 'Solved');
   assert.strictEqual(welcome.fields['Account Audit Confirmed At'], runtime.now);
 
   matchExisting(welcome);
