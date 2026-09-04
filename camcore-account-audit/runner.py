@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 import time
 import urllib.parse
 from typing import Any
@@ -16,6 +17,39 @@ import audit
 REPORTER_PROVISION_TOKEN_ENV = "YOUTRACK_REPORTER_PROVISION_TOKEN"
 REPORTER_HUB_URL_ENV = "YOUTRACK_HUB_URL"
 REPORTER_VISIBILITY_RETRY_DELAYS_SECONDS = (0.25, 0.5, 1.0)
+
+# OPS-271: Helpdesk reporter provisioning is PARKED.
+#
+# Setting this to True is a deliberate, reviewed source change that requires a new
+# pinned image. It must not be re-enabled until the cause of licence-seat
+# consumption by accounts created with userType REPORTER is understood.
+#
+# While this is False, main() does not call install(): the ordinary
+# audit.YouTrackClient stays active and ReporterProvisioner is never constructed,
+# so its unconditional YOUTRACK_HUB_URL validation never runs either.
+REPORTER_PROVISIONING_ENABLED = False
+
+# Exit code used when a provisioning token is supplied to a parked build.
+PARKED_EXIT_CODE = 2
+
+
+def assert_provisioning_parked() -> None:
+    """Refuse to start if a provisioning token is present while parked.
+
+    Called from main() before install() and before audit.main(), so it runs once at
+    process startup and is unaffected by AUDIT_INTERVAL_SECONDS. A check raised
+    later, during per-cycle client construction, would be caught by the
+    (ConfigurationError, RemoteApiError) handler in audit.run and followed by a
+    sleep of AUDIT_INTERVAL_SECONDS - leaving an apparently healthy worker idle for
+    24 hours under production settings. See OPS-271.
+    """
+    token = os.getenv(REPORTER_PROVISION_TOKEN_ENV, "").strip()
+    if token and not REPORTER_PROVISIONING_ENABLED:
+        raise audit.ConfigurationError(
+            f"{REPORTER_PROVISION_TOKEN_ENV} is set but reporter provisioning is parked "
+            "in this build (REPORTER_PROVISIONING_ENABLED is False). Refusing to start. "
+            "See OPS-271."
+        )
 
 
 class ReporterProvisioner:
@@ -42,7 +76,11 @@ class ReporterProvisioner:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.token) and not self.config.dry_run
+        return (
+            REPORTER_PROVISIONING_ENABLED
+            and bool(self.token)
+            and not self.config.dry_run
+        )
 
     def _validated_hub_url(self, override: str | None) -> str:
         sync = urllib.parse.urlsplit(self.config.youtrack_sync_url)
@@ -246,7 +284,23 @@ def install() -> None:
 
 
 def main() -> int:
-    install()
+    try:
+        assert_provisioning_parked()
+    except audit.ConfigurationError as exc:
+        print(
+            json.dumps(
+                {
+                    "event": "startup-aborted",
+                    "reason": "reporter-provisioning-parked",
+                    "detail": str(exc),
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return PARKED_EXIT_CODE
+    if REPORTER_PROVISIONING_ENABLED:
+        install()
     return audit.main()
 
 
