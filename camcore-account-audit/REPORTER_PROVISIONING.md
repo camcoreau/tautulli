@@ -1,5 +1,23 @@
 # CMA Helpdesk reporter provisioning
 
+> **STATUS: PARKED — not in use as of 4 September 2026. See OPS-271.**
+>
+> This feature was armed and executed once, on 3 September 2026 at 20:06 AEST, creating two accounts intended to be Reporters that were subsequently observed to consume licence seats and were removed the following day.
+>
+> Provisioning is gated on the in-source constant `REPORTER_PROVISIONING_ENABLED` in `runner.py`, currently `False`. While parked:
+>
+> - `runner.main()` does **not** call `install()`. The ordinary `audit.YouTrackClient` stays active and `ReporterProvisioner` is never constructed, so its unconditional `YOUTRACK_HUB_URL` validation never runs either.
+> - Supplying `YOUTRACK_REPORTER_PROVISION_TOKEN` makes the worker **exit 2 at startup**, before the scheduled run loop begins, emitting `{"event": "startup-aborted"}` on stderr. It does not silently re-arm.
+> - Both `YOUTRACK_REPORTER_PROVISION_TOKEN` and `YOUTRACK_HUB_URL` have been removed from `compose.example.yml`.
+>
+> Re-enabling requires a reviewed source change and a new pinned image. It cannot be done by configuration alone.
+>
+> **Do not re-arm before resolving why accounts created with `userType: REPORTER` consumed licence seats.** Any test of that question must use a test instance or a staff-controlled synthetic identity, never a real member.
+>
+> Reporter creation is currently a manual step performed at Plex onboarding time.
+>
+> The sections below describe the feature as designed, and apply only if it is un-parked.
+
 The CMA account-audit worker can provision a missing YouTrack Helpdesk Reporter account when a genuinely new Plex member is first observed after the onboarding baseline.
 
 ## Why this exists
@@ -38,17 +56,27 @@ YOUTRACK_HUB_URL=https://support.camcore.au/hub/api/rest
 
 `YOUTRACK_HUB_URL` defaults to `/hub/api/rest` on the same scheme and host as the configured YouTrack sync endpoint. The runner rejects a different host so the provisioning token cannot be sent to an unrelated service through configuration error.
 
-## Rollout
+## Reactivation gate
 
-1. Create or use a dedicated YouTrack service identity for Reporter provisioning.
-2. Grant only `Read User Basic` and `Create User`.
-3. Create a permanent token for that identity and store it in the deployment secret store as `YOUTRACK_REPORTER_PROVISION_TOKEN`.
-4. Deploy the immutable CMA account-audit image with the existing registry, network and CMA token unchanged.
-5. Keep `DRY_RUN=true` for the first image validation. Dry-run must not call Hub user creation.
-6. Confirm the image and tests are clean, then restore the existing production `DRY_RUN=false` configuration.
-7. Use one pending new Plex member as the canary. The first live suppress pass should emit a `reporter-provisioned` event and then return an onboarding notification candidate.
-8. Do not force a notification permit. Let the existing rolling 24-hour gate determine when the welcome ticket is allowed to be created.
-9. Confirm the created reporter has the expected email, the CMA ticket is reported by that user, and the member receives the expected Helpdesk welcome notification before declaring the change fully validated.
+There is **no approved production rollout procedure for this feature.** The previous rollout
+steps were removed deliberately: they restored the shared production worker to `DRY_RUN=false`
+before the canary, which would point a provisioning-enabled all-account worker at the live
+Tautulli inventory. That is the exact hazard this gate exists to prevent.
+
+Before reporter provisioning may be reactivated:
+
+- Reporter provisioning remains **parked**. It has no approved production rollout procedure.
+- Reactivation requires a **separate reviewed PR and validation plan**, prepared only after the
+  cause of licence-seat consumption by accounts created with `userType: REPORTER` has been
+  resolved.
+- Any user-creation canary must run through an **isolated one-shot harness whose input contains
+  exactly one staff-controlled synthetic identity**.
+- **Never point a provisioning-enabled all-account worker at the live Tautulli inventory during a
+  canary.**
+- The **shared production worker stays unchanged throughout canary validation** - not
+  reconfigured, not restarted, not switched out of its current mode.
+- **Canary completion does not authorize production.** Activation requires separate explicit
+  approval.
 
 ## Rollback
 

@@ -13,8 +13,9 @@ services:
       YOUTRACK_URL: https://support.camcore.au
       YOUTRACK_PROJECT_ID: CMA
       YOUTRACK_TOKEN: ${YOUTRACK_TOKEN}
-      YOUTRACK_REPORTER_PROVISION_TOKEN: ${YOUTRACK_REPORTER_PROVISION_TOKEN:-}
-      YOUTRACK_HUB_URL: ${YOUTRACK_HUB_URL:-https://support.camcore.au/hub/api/rest}
+      # OPS-271: reporter provisioning is parked. YOUTRACK_REPORTER_PROVISION_TOKEN
+      # and YOUTRACK_HUB_URL are deliberately absent - supplying the token to a
+      # parked build makes the worker exit 2 at startup. See REPORTER_PROVISIONING.md.
       INACTIVE_DAYS: "60"
       NEVER_USED_DAYS: "14"
       EXCLUDED_USERS: Guest,Local
