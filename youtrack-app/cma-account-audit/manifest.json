@@ -3,9 +3,9 @@
   "name": "cma-account-audit",
   "title": "CMA Account Audit",
   "description": "Project-scoped Tautulli account synchronization for Cameron-Media Account Administration.",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "minYouTrackVersion": "2025.3.0",
-  "changeNotes": "Create one idempotent welcome ticket for each newly observed Plex member while preserving the established account-review and notification safety gates.",
+  "changeNotes": "Solve the idempotent welcome ticket after its creation email while preserving the established account-review and notification safety gates.",
   "vendor": {
     "name": "CamCore.au",
     "url": "https://camcore.au",
