@@ -3,9 +3,9 @@
   "name": "cma-account-audit",
   "title": "CMA Account Audit",
   "description": "Project-scoped Tautulli account synchronization for Cameron-Media Account Administration.",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "minYouTrackVersion": "2025.3.0",
-  "changeNotes": "Solve the idempotent welcome ticket after its creation email while preserving the established account-review and notification safety gates.",
+  "changeNotes": "Mark new onboarding descriptions for the separately gated CMA welcome confirmation template. Existing tickets, sends, review stages and notification limits are unchanged.",
   "vendor": {
     "name": "CamCore.au",
     "url": "https://camcore.au",
