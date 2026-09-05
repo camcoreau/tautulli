@@ -13,6 +13,10 @@ in the `Removal Due` queue.
 - Plex Home managed accounts are always excluded using Tautulli's
   `is_home_user` account attribute. This is mandatory and has no environment
   override.
+- Tautulli's local/server-owner row uses numeric user ID `0` with a null
+  `is_home_user` value. The worker normalizes only that exact combination to
+  non-managed so the existing `Local` username exclusion can handle it; null
+  flags for every other user still fail closed.
 - The stable Plex user ID is the idempotency key. Repeated runs update the same
   ticket instead of creating duplicates. If the ID and username resolve to
   different tickets, synchronization stops without changing either ticket.

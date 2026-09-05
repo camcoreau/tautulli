@@ -406,8 +406,19 @@ class TautulliClient:
                     "Tautulli get_users returned a duplicate user_id",
                 )
 
-            raw_home_user = row.get("is_home_user")
-            if isinstance(raw_home_user, bool):
+            if "is_home_user" not in row:
+                raise EnrichmentError(
+                    "invalid-home-user-flag",
+                    "Tautulli get_users row has no is_home_user value",
+                )
+            raw_home_user = row["is_home_user"]
+            # Tautulli represents the local/server-owner row (numeric user ID 0)
+            # with a null home-user flag. It is not a Plex Home managed account;
+            # preserve it as non-managed so the existing Local username exclusion
+            # can handle it. A null flag for any other user remains unsafe.
+            if raw_home_user is None and user_id == "0":
+                is_home_user = False
+            elif isinstance(raw_home_user, bool):
                 is_home_user = raw_home_user
             elif isinstance(raw_home_user, int) and raw_home_user in (0, 1):
                 is_home_user = bool(raw_home_user)
