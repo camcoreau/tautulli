@@ -703,6 +703,21 @@ class HomeUserEnrichmentTests(unittest.TestCase):
         self.assertEqual(["test"], query["apikey"])
         self.assertEqual({}, http.calls[0][1])
 
+    def test_get_users_accepts_null_home_flag_only_for_local_user_zero(self):
+        client, _ = self.client(
+            {
+                "response": {
+                    "result": "success",
+                    "data": [
+                        {"user_id": 0, "is_home_user": None},
+                        {"user_id": 1, "is_home_user": 0},
+                    ],
+                }
+            }
+        )
+
+        self.assertEqual({"0": False, "1": False}, client.home_user_map())
+
     def test_get_users_fails_closed_for_every_abnormal_shape(self):
         cases = [
             (
@@ -757,6 +772,24 @@ class HomeUserEnrichmentTests(unittest.TestCase):
                     "response": {
                         "result": "success",
                         "data": [{"user_id": 1, "is_home_user": "yes"}],
+                    }
+                },
+            ),
+            (
+                "invalid-home-user-flag",
+                {
+                    "response": {
+                        "result": "success",
+                        "data": [{"user_id": 1, "is_home_user": None}],
+                    }
+                },
+            ),
+            (
+                "invalid-home-user-flag",
+                {
+                    "response": {
+                        "result": "success",
+                        "data": [{"user_id": 0}],
                     }
                 },
             ),
