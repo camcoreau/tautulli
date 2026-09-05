@@ -1,15 +1,18 @@
 # Cameron-Media account audit worker
 
-This worker reads the Tautulli users table and synchronizes account-review facts
-into the `CMA` YouTrack Helpdesk project. It is intentionally unable to remove
-Plex access. The final destructive action remains an administrator task in the
-`Removal Due` queue.
+This worker reads the Tautulli user inventory and synchronizes account-review
+facts into the `CMA` YouTrack Helpdesk project. It is intentionally unable to
+remove Plex access. The final destructive action remains an administrator task
+in the `Removal Due` queue.
 
 ## Policy
 
 - A user becomes `Inactive` when their last stream is at least 60 days old.
 - A zero-play account becomes reviewable after it has been observed for 14 days.
 - `Guest` and `Local` are always excluded, case-insensitively.
+- Plex Home managed accounts are always excluded using Tautulli's
+  `is_home_user` account attribute. This is mandatory and has no environment
+  override.
 - The stable Plex user ID is the idempotency key. Repeated runs update the same
   ticket instead of creating duplicates. If the ID and username resolve to
   different tickets, synchronization stops without changing either ticket.
@@ -29,6 +32,9 @@ Plex access. The final destructive action remains an administrator task in the
   synchronization. Plays greater than zero require a positive last-streamed
   timestamp; zero plays require no timestamp. Timestamps more than five minutes
   in the future are rejected.
+- Managed-account enrichment is also fail-closed. A failed, empty, malformed,
+  duplicate or incomplete `get_users` result aborts before any YouTrack request
+  and before the registry is loaded or saved.
 
 The 14-day timer is based on the first time this worker observes a zero-play
 account because Tautulli does not expose a reliable share-created timestamp in
@@ -64,24 +70,28 @@ system can permit no more than one member-visible notification in any rolling
 24-hour window. Dry-run executes the same protocol handshake and first,
 read-only planning pass, then stops before permit selection:
 
-1. Before it reads the Tautulli account inventory, every worker calls the
-   app's read-only `protocol` endpoint and requires the exact reviewed policy,
-   modes, one-notification limit and 24-hour window. The legacy app has no such
-   endpoint, so a wrong-order worker deployment stops before any account sync
-   request can mutate a ticket.
-2. The worker sends every account through a `suppress` pass using one unique
+1. The worker first takes the exclusive registry lock, reads `get_users_table`
+   and enriches that inventory from `get_users`. Every enumerated account must
+   have one valid `is_home_user` value. Managed accounts are excluded before
+   registry observation or YouTrack synchronization.
+2. After enrichment, the worker calls the app's read-only `protocol` endpoint
+   and requires the exact reviewed policy, modes, one-notification limit and
+   24-hour window. The handshake still occurs before the registry is loaded and
+   before any account sync request, so a legacy or mismatched app cannot mutate
+   a ticket.
+3. The worker sends every non-excluded account through a `suppress` pass using one unique
    cycle ID. Every suppress request is read-only, including non-candidates: it
    may search, validate and plan, but cannot change facts, create tickets, pulse
    audit freshness, change stages, write global storage or add comments. A
    candidate returns a deferred receipt; a non-candidate returns strict
    `planned`.
-3. Only when every suppress response is valid and the pass has no errors may the
+4. Only when every suppress response is valid and the pass has no errors may the
    worker select one candidate deterministically. Persisted per-Plex-user permit
    timestamps rotate the backlog toward the least recently permitted candidate.
    The worker atomically records that history and a durable local reservation in
    the registry before repeating exactly that account in `permit` mode. All
    other candidates remain deferred.
-4. The YouTrack app atomically reserves its independent `AppGlobalStorage`
+5. The YouTrack app atomically reserves its independent `AppGlobalStorage`
    budget before any issue side effects. An unavailable server budget returns a
    determinate deferral with no issue writes. A permit request that is no longer
    a candidate also returns `planned` without reserving or writing. The endpoint
@@ -100,14 +110,21 @@ bypassing the cap. Persisting the local reservation before the permit request
 means a timeout or ambiguous response consumes the local window instead of
 risking a duplicate notification.
 
-Every live or dry-run cycle completes its protocol handshake first, then
-acquires an exclusive, non-blocking process lock beside its selected
-registry (for example, `/data/registry.json.lock`). The lock is held from
-registry load through Tautulli enumeration, all YouTrack requests and the final
-registry save. A second worker that targets the same registry fails before
-inventory enumeration or synchronization instead of racing a permit. The small
-lock file remains on disk intentionally; the operating-system lock is released
-when the cycle exits or the process stops.
+Every live or dry-run cycle acquires an exclusive, non-blocking process lock
+beside its selected registry (for example, `/data/registry.json.lock`) before
+Tautulli enumeration. The lock is held through enrichment, the YouTrack
+protocol handshake, registry load, all account requests and the final registry
+save. A second worker that targets the same registry fails before inventory
+enumeration or synchronization instead of racing a permit. The small lock file
+remains on disk intentionally; the operating-system lock is released when the
+cycle exits or the process stops.
+
+An enrichment abort emits `event=enrichment-aborted` evidence and retries after
+five minutes rather than waiting for the daily interval. Three consecutive
+enrichment failures emit `event=enrichment-aborted-terminal` and exit with code
+3 so `restart: unless-stopped` exposes a persistent failure as a restarting
+container. Only an exit-0 cycle resets the consecutive-failure count. A
+one-shot run cannot retry and exits 3 immediately after recording both events.
 
 The registry deliberately retains `schemaVersion: 1`. The new notification gate
 and per-user history are additional top-level keys, so the previous worker can

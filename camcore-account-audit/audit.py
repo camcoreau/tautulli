@@ -12,7 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -37,6 +37,9 @@ ONBOARDING_EXISTING_TICKET_ACTION = "onboarding-existing-ticket"
 ONBOARDING_STATES = frozenset({"baseline", "pending", "completed"})
 TRANSIENT_GET_RETRY_DELAY_SECONDS = 1.0
 PERMIT_CONFLICT_RETRY_DELAYS_SECONDS = (0.25, 0.5, 1.0)
+ENRICHMENT_RETRY_DELAY_SECONDS = 300
+ENRICHMENT_MAX_CONSECUTIVE_FAILURES = 3
+ENRICHMENT_TERMINAL_EXIT_CODE = 3
 NOTIFICATION_GATE_STATUSES = frozenset(
     {
         "reserved",
@@ -71,6 +74,15 @@ class ConfigurationError(RuntimeError):
 
 class RemoteApiError(RuntimeError):
     """Raised when Tautulli or YouTrack rejects a request."""
+
+
+class EnrichmentError(RemoteApiError):
+    """Raised when managed-account enrichment cannot be completed safely."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.cycle_id: str | None = None
 
 
 class RemoteHttpError(RemoteApiError):
@@ -233,6 +245,7 @@ class Account:
     last_streamed: datetime | None
     total_plays: int
     watch_seconds: int
+    is_home_user: bool = False
 
 
 @dataclass(frozen=True)
@@ -345,6 +358,74 @@ class TautulliClient:
             if account is not None:
                 accounts.append(account)
         return accounts
+
+    def home_user_map(self) -> dict[str, bool]:
+        """Return a complete Plex-user to managed-home-account mapping."""
+        query = urllib.parse.urlencode(
+            {
+                "apikey": self.config.tautulli_api_key,
+                "cmd": "get_users",
+            }
+        )
+        payload = self.http.request(f"{self.config.tautulli_url}/api/v2?{query}")
+        response = payload.get("response") if isinstance(payload, dict) else None
+        if not isinstance(response, dict):
+            raise EnrichmentError(
+                "invalid-response",
+                "Tautulli get_users returned an invalid response object",
+            )
+        if response.get("result") != "success":
+            raise EnrichmentError(
+                "get-users-failed",
+                "Tautulli get_users failed",
+            )
+
+        rows = response.get("data")
+        if not isinstance(rows, list):
+            raise EnrichmentError(
+                "invalid-data-list",
+                "Tautulli get_users returned an invalid data list",
+            )
+
+        mapping: dict[str, bool] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                raise EnrichmentError(
+                    "invalid-row",
+                    "Tautulli get_users returned a non-object row",
+                )
+            user_id = coerce_user_id(row.get("user_id"))
+            if user_id is None:
+                raise EnrichmentError(
+                    "missing-user-id",
+                    "Tautulli get_users row has no usable user_id",
+                )
+            if user_id in mapping:
+                raise EnrichmentError(
+                    "duplicate-user-id",
+                    "Tautulli get_users returned a duplicate user_id",
+                )
+
+            raw_home_user = row.get("is_home_user")
+            if isinstance(raw_home_user, bool):
+                is_home_user = raw_home_user
+            elif isinstance(raw_home_user, int) and raw_home_user in (0, 1):
+                is_home_user = bool(raw_home_user)
+            elif isinstance(raw_home_user, str) and raw_home_user in ("0", "1"):
+                is_home_user = raw_home_user == "1"
+            else:
+                raise EnrichmentError(
+                    "invalid-home-user-flag",
+                    "Tautulli get_users returned an invalid is_home_user value",
+                )
+            mapping[user_id] = is_home_user
+
+        if not mapping:
+            raise EnrichmentError(
+                "empty-data",
+                "Tautulli get_users returned no usable rows",
+            )
+        return mapping
 
 
 class YouTrackClient:
@@ -977,6 +1058,18 @@ def last_streamed_from_row(
     return last_streamed
 
 
+def coerce_user_id(value: Any) -> str | None:
+    """Return a Plex user ID as text without collapsing numeric zero."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    return None
+
+
 def account_from_row(
     row: Any,
     *,
@@ -984,9 +1077,9 @@ def account_from_row(
 ) -> Account | None:
     if not isinstance(row, dict):
         return None
-    user_id = str(row.get("user_id") or "").strip()
+    user_id = coerce_user_id(row.get("user_id"))
     username = str(row.get("username") or row.get("friendly_name") or "").strip()
-    if not user_id or not username:
+    if user_id is None or not username:
         return None
 
     observed_at = observed_at or utc_now()
@@ -1005,6 +1098,32 @@ def account_from_row(
         total_plays=total_plays,
         watch_seconds=optional_non_negative_int("duration", row.get("duration")),
     )
+
+
+def reconcile_home_users(
+    accounts: list[Account], mapping: dict[str, bool]
+) -> list[Account]:
+    """Attach managed-home-account state to every enumerated account."""
+    missing = [account.user_id for account in accounts if account.user_id not in mapping]
+    if missing:
+        raise EnrichmentError(
+            "incomplete-data",
+            f"Home-user enrichment is incomplete for {len(missing)} account(s)",
+        )
+
+    invalid = [
+        account.user_id
+        for account in accounts
+        if not isinstance(mapping[account.user_id], bool)
+    ]
+    if invalid:
+        raise EnrichmentError(
+            "invalid-home-user-flag",
+            f"Home-user enrichment is invalid for {len(invalid)} account(s)",
+        )
+    return [
+        replace(account, is_home_user=mapping[account.user_id]) for account in accounts
+    ]
 
 
 def classify_account(
@@ -1069,39 +1188,72 @@ def public_account(account: Account) -> dict[str, Any]:
 
 def run_once(config: Config, observed_at: datetime | None = None) -> int:
     observed_at = observed_at or utc_now()
+    cycle_id = "audit-" + uuid.uuid4().hex
     http = JsonHttpClient(config.timeout_seconds)
     tautulli = TautulliClient(config, http)
     youtrack = YouTrackClient(config, http)
     registry = Registry(config.registry_path)
-    # This read-only endpoint does not exist in the legacy app. Prove exact
-    # suppress/permit compatibility before enumerating accounts. Dry-run uses
-    # the same handshake and read-only suppress pass as live mode so its
-    # projected notification set cannot diverge from the production planner.
-    validate_protocol_response(youtrack.protocol())
-    # Serialize the entire registry and remote-sync cycle. A second process
-    # fails immediately instead of reading a stale gate or racing a reservation.
+
+    # Serialize the entire registry and remote-sync cycle. A second process fails
+    # immediately instead of reading a stale gate or racing a reservation.
+    # Enumerate and enrich first so a managed-account lookup failure makes no
+    # YouTrack request and cannot read or mutate the registry.
     with RegistryLock(config.registry_path):
-        return _run_once_locked(config, observed_at, tautulli, youtrack, registry)
+        try:
+            accounts = tautulli.accounts()
+            home_users = tautulli.home_user_map()
+            accounts = reconcile_home_users(accounts, home_users)
+        except EnrichmentError as exc:
+            exc.cycle_id = cycle_id
+            raise
+
+        # This read-only endpoint does not exist in the legacy app. Prove exact
+        # suppress/permit compatibility after enrichment and before registry load
+        # or any account sync request.
+        validate_protocol_response(youtrack.protocol())
+        return _run_once_locked(
+            config,
+            observed_at,
+            youtrack,
+            registry,
+            accounts=accounts,
+            cycle_id=cycle_id,
+        )
 
 
 def _run_once_locked(
     config: Config,
     observed_at: datetime,
-    tautulli: TautulliClient,
     youtrack: YouTrackClient,
     registry: Registry,
+    *,
+    accounts: list[Account],
+    cycle_id: str,
 ) -> int:
     registry.load()
-    cycle_id = "audit-" + uuid.uuid4().hex
 
     errors = 0
     processed = 0
     excluded = 0
     entries: list[dict[str, Any]] = []
-    for account in tautulli.accounts():
+    for account in accounts:
+        exclusion_reason = None
         if account.username.casefold() in config.excluded_users:
+            exclusion_reason = "excluded-username"
+        elif account.is_home_user:
+            exclusion_reason = "excluded-home-user"
+        if exclusion_reason is not None:
             excluded += 1
-            print(json.dumps({"event": "excluded", "username": account.username}))
+            print(
+                json.dumps(
+                    {
+                        "event": "excluded",
+                        "username": account.username,
+                        "reason": exclusion_reason,
+                    },
+                    sort_keys=True,
+                )
+            )
             continue
 
         first_seen, onboarding_requested = registry.observe_account(account, observed_at)
@@ -1300,13 +1452,80 @@ def _run_once_locked(
     return 1 if errors else 0
 
 
+def report_enrichment_abort(
+    exc: EnrichmentError,
+    *,
+    consecutive_failures: int,
+    next_retry_seconds: int,
+    terminal: bool,
+) -> None:
+    """Emit bounded, non-sensitive operational evidence for an enrichment abort."""
+    cycle_id = exc.cycle_id or "audit-" + uuid.uuid4().hex
+    exc.cycle_id = cycle_id
+    print(
+        json.dumps(
+            {
+                "event": "enrichment-aborted",
+                "reason": exc.reason,
+                "consecutiveFailures": consecutive_failures,
+                "cycleId": cycle_id,
+                "nextRetrySeconds": next_retry_seconds,
+            },
+            sort_keys=True,
+        ),
+        file=sys.stderr,
+    )
+    if terminal:
+        print(
+            json.dumps(
+                {
+                    "event": "enrichment-aborted-terminal",
+                    "reason": exc.reason,
+                    "consecutiveFailures": consecutive_failures,
+                    "cycleId": cycle_id,
+                    "exitCode": ENRICHMENT_TERMINAL_EXIT_CODE,
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+
+
 def run(config: Config) -> int:
     if config.interval_seconds == 0:
-        return run_once(config)
+        try:
+            return run_once(config)
+        except EnrichmentError as exc:
+            report_enrichment_abort(
+                exc,
+                consecutive_failures=1,
+                next_retry_seconds=0,
+                terminal=True,
+            )
+            return ENRICHMENT_TERMINAL_EXIT_CODE
 
+    consecutive_enrichment_failures = 0
     while True:
         try:
             exit_code = run_once(config)
+            if exit_code == 0:
+                consecutive_enrichment_failures = 0
+        except EnrichmentError as exc:
+            consecutive_enrichment_failures += 1
+            terminal = (
+                consecutive_enrichment_failures
+                >= ENRICHMENT_MAX_CONSECUTIVE_FAILURES
+            )
+            report_enrichment_abort(
+                exc,
+                consecutive_failures=consecutive_enrichment_failures,
+                next_retry_seconds=0 if terminal else ENRICHMENT_RETRY_DELAY_SECONDS,
+                terminal=terminal,
+            )
+            if terminal:
+                return ENRICHMENT_TERMINAL_EXIT_CODE
+            time.sleep(ENRICHMENT_RETRY_DELAY_SECONDS)
+            continue
         except (ConfigurationError, RemoteApiError) as exc:
             exit_code = 1
             print(json.dumps({"event": "run-error", "message": str(exc)}), file=sys.stderr)

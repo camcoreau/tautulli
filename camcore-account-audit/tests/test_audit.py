@@ -31,6 +31,7 @@ def account(
     username="member",
     user_id="42",
     email="member@example.invalid",
+    is_home_user=False,
 ):
     return audit.Account(
         user_id=user_id,
@@ -39,6 +40,7 @@ def account(
         last_streamed=last_streamed,
         total_plays=plays,
         watch_seconds=3600,
+        is_home_user=is_home_user,
     )
 
 
@@ -463,6 +465,54 @@ class MappingTests(unittest.TestCase):
         self.assertEqual(7260, result.watch_seconds)
         self.assertEqual("2 hrs 1 mins", audit.format_watch_time(result.watch_seconds))
 
+    def test_numeric_and_text_zero_user_ids_are_preserved(self):
+        for user_id in (0, "0"):
+            with self.subTest(user_id=user_id):
+                result = audit.account_from_row(
+                    {
+                        "user_id": user_id,
+                        "username": "Local",
+                        "last_seen": 0,
+                        "plays": 0,
+                        "duration": 0,
+                    }
+                )
+                self.assertIsNotNone(result)
+                self.assertEqual("0", result.user_id)
+
+    def test_absent_and_boolean_user_ids_are_rejected(self):
+        for row in (
+            {
+                "username": "Missing",
+                "last_seen": 0,
+                "plays": 0,
+                "duration": 0,
+            },
+            {
+                "user_id": None,
+                "username": "None",
+                "last_seen": 0,
+                "plays": 0,
+                "duration": 0,
+            },
+            {
+                "user_id": False,
+                "username": "False",
+                "last_seen": 0,
+                "plays": 0,
+                "duration": 0,
+            },
+            {
+                "user_id": 1.5,
+                "username": "Float",
+                "last_seen": 0,
+                "plays": 0,
+                "duration": 0,
+            },
+        ):
+            with self.subTest(user_id=row.get("user_id", "missing")):
+                self.assertIsNone(audit.account_from_row(row))
+
     def test_missing_or_malformed_play_count_fails_closed(self):
         base = {
             "user_id": 99,
@@ -611,6 +661,140 @@ class MappingTests(unittest.TestCase):
 
         self.assertEqual("present", result["email"])
         self.assertNotIn("example.invalid", str(result))
+
+
+class HomeUserEnrichmentTests(unittest.TestCase):
+    class StubHttp:
+        def __init__(self, payload):
+            self.payload = payload
+            self.calls = []
+
+        def request(self, url, **kwargs):
+            self.calls.append((url, kwargs))
+            return self.payload
+
+    def client(self, payload):
+        http = self.StubHttp(payload)
+        return audit.TautulliClient(config(Path("registry.json")), http), http
+
+    def test_get_users_builds_a_complete_typed_mapping_and_preserves_zero(self):
+        client, http = self.client(
+            {
+                "response": {
+                    "result": "success",
+                    "data": [
+                        {"user_id": 0, "is_home_user": 1},
+                        {"user_id": "2", "is_home_user": "0"},
+                        {"user_id": 3, "is_home_user": True},
+                        {"user_id": 4, "is_home_user": False},
+                    ],
+                }
+            }
+        )
+
+        self.assertEqual(
+            {"0": True, "2": False, "3": True, "4": False},
+            client.home_user_map(),
+        )
+        self.assertEqual(1, len(http.calls))
+        parsed = audit.urllib.parse.urlsplit(http.calls[0][0])
+        query = audit.urllib.parse.parse_qs(parsed.query)
+        self.assertEqual(["get_users"], query["cmd"])
+        self.assertEqual(["test"], query["apikey"])
+        self.assertEqual({}, http.calls[0][1])
+
+    def test_get_users_fails_closed_for_every_abnormal_shape(self):
+        cases = [
+            (
+                "invalid-response",
+                {"response": []},
+            ),
+            (
+                "get-users-failed",
+                {"response": {"result": "error", "data": []}},
+            ),
+            (
+                "invalid-data-list",
+                {"response": {"result": "success", "data": {}}},
+            ),
+            (
+                "invalid-row",
+                {"response": {"result": "success", "data": [None]}},
+            ),
+            (
+                "missing-user-id",
+                {
+                    "response": {
+                        "result": "success",
+                        "data": [{"is_home_user": 0}],
+                    }
+                },
+            ),
+            (
+                "missing-user-id",
+                {
+                    "response": {
+                        "result": "success",
+                        "data": [{"user_id": {}, "is_home_user": 0}],
+                    }
+                },
+            ),
+            (
+                "duplicate-user-id",
+                {
+                    "response": {
+                        "result": "success",
+                        "data": [
+                            {"user_id": 1, "is_home_user": 0},
+                            {"user_id": "1", "is_home_user": 0},
+                        ],
+                    }
+                },
+            ),
+            (
+                "invalid-home-user-flag",
+                {
+                    "response": {
+                        "result": "success",
+                        "data": [{"user_id": 1, "is_home_user": "yes"}],
+                    }
+                },
+            ),
+            (
+                "empty-data",
+                {"response": {"result": "success", "data": []}},
+            ),
+        ]
+        for expected_reason, payload in cases:
+            with self.subTest(reason=expected_reason):
+                client, _ = self.client(payload)
+                with self.assertRaises(audit.EnrichmentError) as raised:
+                    client.home_user_map()
+                self.assertEqual(expected_reason, raised.exception.reason)
+
+    def test_reconcile_attaches_home_user_state_without_mutating_inputs(self):
+        original = [account(user_id="1"), account(user_id="2")]
+
+        enriched = audit.reconcile_home_users(
+            original,
+            {"1": True, "2": False},
+        )
+
+        self.assertFalse(original[0].is_home_user)
+        self.assertTrue(enriched[0].is_home_user)
+        self.assertFalse(enriched[1].is_home_user)
+        self.assertIsNot(original[0], enriched[0])
+
+    def test_reconcile_fails_closed_without_disclosing_missing_ids(self):
+        missing_id = "private-member-id"
+        with self.assertRaises(audit.EnrichmentError) as raised:
+            audit.reconcile_home_users(
+                [account(user_id=missing_id)],
+                {},
+            )
+
+        self.assertEqual("incomplete-data", raised.exception.reason)
+        self.assertNotIn(missing_id, str(raised.exception))
 
 
 class RegistryTests(unittest.TestCase):
@@ -1098,22 +1282,39 @@ class RunOnceTests(unittest.TestCase):
         clock_at=None,
         dry_run=False,
         protocol_response=None,
+        home_user_result=None,
+        request_log=None,
     ):
         calls = []
         clock_at = clock_at or observed_at
+        request_log = request_log if request_log is not None else []
 
         class StubTautulliClient:
             def __init__(self, _config, _http):
-                pass
+                self.enumerated_accounts = None
 
             def accounts(self):
-                return list(accounts)
+                request_log.append("tautulli-accounts")
+                self.enumerated_accounts = list(accounts)
+                return self.enumerated_accounts
+
+            def home_user_map(self):
+                request_log.append("tautulli-home-users")
+                if isinstance(home_user_result, BaseException):
+                    raise home_user_result
+                if home_user_result is not None:
+                    return dict(home_user_result)
+                return {
+                    target.user_id: target.is_home_user
+                    for target in self.enumerated_accounts
+                }
 
         class StubYouTrackClient:
             def __init__(self, _config, _http):
                 pass
 
             def protocol(self):
+                request_log.append("youtrack-protocol")
                 if isinstance(protocol_response, BaseException):
                     raise protocol_response
                 return protocol_receipt() if protocol_response is None else protocol_response
@@ -1127,6 +1328,7 @@ class RunOnceTests(unittest.TestCase):
                 notification_mode,
                 cycle_id,
             ):
+                request_log.append("youtrack-sync")
                 calls.append(
                     {
                         "account": target,
@@ -1301,11 +1503,7 @@ class RunOnceTests(unittest.TestCase):
                 "completed", saved["users"]["43"]["onboardingState"]
             )
 
-    def test_legacy_or_invalid_protocol_stops_before_account_enumeration(self):
-        class MustNotEnumerate:
-            def __iter__(self):
-                raise AssertionError("Tautulli accounts were enumerated before the handshake")
-
+    def test_legacy_or_invalid_protocol_stops_after_enrichment_before_registry_sync(self):
         unsafe_responses = [
             audit.RemoteApiError("GET protocol returned HTTP 404"),
             {"result": "legacy-account-sync"},
@@ -1324,7 +1522,7 @@ class RunOnceTests(unittest.TestCase):
                     path.write_text(json.dumps(original), encoding="utf-8")
                     with self.assertRaises(audit.RemoteApiError):
                         self.run_worker(
-                            accounts=MustNotEnumerate(),
+                            accounts=[account(user_id=str(index + 1))],
                             registry_path=path,
                             responder=lambda *_args: (_ for _ in ()).throw(
                                 AssertionError("sync POST was called before the handshake")
@@ -1335,9 +1533,9 @@ class RunOnceTests(unittest.TestCase):
                         original,
                         json.loads(path.read_text(encoding="utf-8")),
                     )
-                    self.assertFalse(
+                    self.assertTrue(
                         path.with_name(path.name + ".lock").exists(),
-                        "the registry lock was acquired before protocol validation",
+                        "the whole enumeration and handshake cycle must stay locked",
                     )
 
     def test_held_registry_lock_stops_before_inventory_or_sync(self):
@@ -1371,6 +1569,143 @@ class RunOnceTests(unittest.TestCase):
                 original,
                 json.loads(path.read_text(encoding="utf-8")),
             )
+
+    def test_enrichment_abort_makes_no_youtrack_request_or_registry_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            original = b'{"schemaVersion":1,"users":{},"sentinel":"preserve"}\n'
+            path.write_bytes(original)
+            request_log = []
+            failure = audit.EnrichmentError(
+                "invalid-home-user-flag",
+                "synthetic enrichment failure",
+            )
+
+            with self.assertRaises(audit.EnrichmentError) as raised:
+                self.run_worker(
+                    accounts=[account(user_id="1")],
+                    registry_path=path,
+                    home_user_result=failure,
+                    request_log=request_log,
+                )
+
+            self.assertEqual(
+                ["tautulli-accounts", "tautulli-home-users"],
+                request_log,
+            )
+            self.assertEqual(original, path.read_bytes())
+            self.assertTrue(path.with_name(path.name + ".lock").exists())
+            self.assertRegex(raised.exception.cycle_id, r"^audit-[0-9a-f]{32}$")
+
+    def test_incomplete_enrichment_fails_before_youtrack(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            request_log = []
+
+            with self.assertRaises(audit.EnrichmentError) as raised:
+                self.run_worker(
+                    accounts=[account(user_id="1")],
+                    registry_path=path,
+                    home_user_result={},
+                    request_log=request_log,
+                )
+
+            self.assertEqual("incomplete-data", raised.exception.reason)
+            self.assertEqual(
+                ["tautulli-accounts", "tautulli-home-users"],
+                request_log,
+            )
+            self.assertFalse(path.exists())
+
+    def test_managed_home_accounts_are_excluded_with_a_reason(self):
+        normal = account(
+            user_id="1",
+            username="ordinary-member",
+            last_streamed=NOW,
+        )
+        managed = account(
+            user_id="2",
+            username="managed-member",
+            is_home_user=True,
+        )
+
+        def responder(target, _decision, mode, cycle_id):
+            return sync_receipt(
+                notification_mode=mode,
+                cycle_id=cycle_id,
+                plex_user_id=target.user_id,
+                result="planned",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            exit_code, calls, stdout, stderr = self.run_worker(
+                accounts=[managed, normal],
+                registry_path=Path(directory) / "registry.json",
+                responder=responder,
+                dry_run=True,
+            )
+
+        self.assertEqual(0, exit_code, stderr)
+        self.assertEqual(["1"], [item["account"].user_id for item in calls])
+        events = [json.loads(line) for line in stdout.splitlines()]
+        excluded = [event for event in events if event["event"] == "excluded"]
+        self.assertEqual(
+            [
+                {
+                    "event": "excluded",
+                    "reason": "excluded-home-user",
+                    "username": "managed-member",
+                }
+            ],
+            excluded,
+        )
+        complete = next(event for event in events if event["event"] == "complete")
+        self.assertEqual(1, complete["excluded"])
+        self.assertEqual(1, complete["processed"])
+
+    def test_numeric_zero_local_account_is_excluded_and_counted(self):
+        local = audit.account_from_row(
+            {
+                "user_id": 0,
+                "username": "Local",
+                "last_seen": 0,
+                "plays": 0,
+                "duration": 0,
+            },
+            observed_at=NOW,
+        )
+        self.assertIsNotNone(local)
+
+        normal = account(
+            user_id="1",
+            username="ordinary-member",
+            last_streamed=NOW,
+        )
+
+        def responder(target, _decision, mode, cycle_id):
+            return sync_receipt(
+                notification_mode=mode,
+                cycle_id=cycle_id,
+                plex_user_id=target.user_id,
+                result="planned",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            exit_code, calls, stdout, stderr = self.run_worker(
+                accounts=[local, normal],
+                registry_path=Path(directory) / "registry.json",
+                responder=responder,
+                dry_run=True,
+            )
+
+        self.assertEqual(0, exit_code, stderr)
+        self.assertEqual(["1"], [item["account"].user_id for item in calls])
+        events = [json.loads(line) for line in stdout.splitlines()]
+        excluded = next(event for event in events if event["event"] == "excluded")
+        self.assertEqual("excluded-username", excluded["reason"])
+        complete = next(event for event in events if event["event"] == "complete")
+        self.assertEqual(1, complete["excluded"])
+        self.assertEqual(1, complete["processed"])
 
     def test_three_candidates_issue_only_one_permit_post(self):
         candidates = [
@@ -1901,6 +2236,171 @@ class RunOnceTests(unittest.TestCase):
                     )
                     with self.assertRaises(audit.ConfigurationError):
                         audit.Registry(path).load()
+
+
+class RunLoopEnrichmentTests(unittest.TestCase):
+    @staticmethod
+    def failure(reason="invalid-home-user-flag"):
+        return audit.EnrichmentError(reason, "synthetic enrichment failure")
+
+    @staticmethod
+    def runtime_config(path, *, interval_seconds):
+        return audit.replace(
+            config(path),
+            interval_seconds=interval_seconds,
+        )
+
+    def test_one_shot_enrichment_abort_exits_three_without_sleeping(self):
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            audit,
+            "run_once",
+            side_effect=self.failure("empty-data"),
+        ), mock.patch.object(audit.time, "sleep") as sleep, redirect_stderr(stderr):
+            exit_code = audit.run(
+                self.runtime_config(
+                    Path(directory) / "registry.json",
+                    interval_seconds=0,
+                )
+            )
+
+        self.assertEqual(audit.ENRICHMENT_TERMINAL_EXIT_CODE, exit_code)
+        sleep.assert_not_called()
+        events = [json.loads(line) for line in stderr.getvalue().splitlines()]
+        self.assertEqual(
+            ["enrichment-aborted", "enrichment-aborted-terminal"],
+            [event["event"] for event in events],
+        )
+        self.assertEqual("empty-data", events[0]["reason"])
+        self.assertEqual(1, events[0]["consecutiveFailures"])
+        self.assertEqual(0, events[0]["nextRetrySeconds"])
+        self.assertEqual(events[0]["cycleId"], events[1]["cycleId"])
+        self.assertNotIn("synthetic enrichment failure", stderr.getvalue())
+
+    def test_scheduled_enrichment_aborts_retry_twice_then_exit_three(self):
+        failures = [self.failure() for _ in range(3)]
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            audit,
+            "run_once",
+            side_effect=failures,
+        ) as run_once, mock.patch.object(
+            audit.time, "sleep"
+        ) as sleep, redirect_stderr(stderr):
+            exit_code = audit.run(
+                self.runtime_config(
+                    Path(directory) / "registry.json",
+                    interval_seconds=86400,
+                )
+            )
+
+        self.assertEqual(audit.ENRICHMENT_TERMINAL_EXIT_CODE, exit_code)
+        self.assertEqual(3, run_once.call_count)
+        self.assertEqual(
+            [
+                mock.call(audit.ENRICHMENT_RETRY_DELAY_SECONDS),
+                mock.call(audit.ENRICHMENT_RETRY_DELAY_SECONDS),
+            ],
+            sleep.call_args_list,
+        )
+        events = [json.loads(line) for line in stderr.getvalue().splitlines()]
+        aborted = [event for event in events if event["event"] == "enrichment-aborted"]
+        self.assertEqual([1, 2, 3], [event["consecutiveFailures"] for event in aborted])
+        self.assertEqual(
+            [
+                audit.ENRICHMENT_RETRY_DELAY_SECONDS,
+                audit.ENRICHMENT_RETRY_DELAY_SECONDS,
+                0,
+            ],
+            [event["nextRetrySeconds"] for event in aborted],
+        )
+        terminal = [
+            event for event in events if event["event"] == "enrichment-aborted-terminal"
+        ]
+        self.assertEqual(1, len(terminal))
+        self.assertEqual(3, terminal[0]["consecutiveFailures"])
+
+    def test_successful_cycle_resets_consecutive_failure_count(self):
+        outcomes = [
+            self.failure(),
+            self.failure(),
+            0,
+            self.failure(),
+            self.failure(),
+            self.failure(),
+        ]
+        stderr = io.StringIO()
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            audit,
+            "run_once",
+            side_effect=outcomes,
+        ), mock.patch.object(audit.time, "sleep") as sleep, redirect_stdout(
+            stdout
+        ), redirect_stderr(stderr):
+            exit_code = audit.run(
+                self.runtime_config(
+                    Path(directory) / "registry.json",
+                    interval_seconds=86400,
+                )
+            )
+
+        self.assertEqual(audit.ENRICHMENT_TERMINAL_EXIT_CODE, exit_code)
+        events = [json.loads(line) for line in stderr.getvalue().splitlines()]
+        aborted = [event for event in events if event["event"] == "enrichment-aborted"]
+        self.assertEqual(
+            [1, 2, 1, 2, 3],
+            [event["consecutiveFailures"] for event in aborted],
+        )
+        self.assertEqual(
+            [
+                mock.call(audit.ENRICHMENT_RETRY_DELAY_SECONDS),
+                mock.call(audit.ENRICHMENT_RETRY_DELAY_SECONDS),
+                mock.call(86400),
+                mock.call(audit.ENRICHMENT_RETRY_DELAY_SECONDS),
+                mock.call(audit.ENRICHMENT_RETRY_DELAY_SECONDS),
+            ],
+            sleep.call_args_list,
+        )
+
+    def test_nonzero_cycle_does_not_reset_enrichment_failure_count(self):
+        outcomes = [
+            self.failure(),
+            self.failure(),
+            1,
+            self.failure(),
+        ]
+        stderr = io.StringIO()
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            audit,
+            "run_once",
+            side_effect=outcomes,
+        ), mock.patch.object(audit.time, "sleep") as sleep, redirect_stdout(
+            stdout
+        ), redirect_stderr(stderr):
+            exit_code = audit.run(
+                self.runtime_config(
+                    Path(directory) / "registry.json",
+                    interval_seconds=86400,
+                )
+            )
+
+        self.assertEqual(audit.ENRICHMENT_TERMINAL_EXIT_CODE, exit_code)
+        events = [json.loads(line) for line in stderr.getvalue().splitlines()]
+        aborted = [event for event in events if event["event"] == "enrichment-aborted"]
+        self.assertEqual(
+            [1, 2, 3],
+            [event["consecutiveFailures"] for event in aborted],
+        )
+        self.assertEqual(
+            [
+                mock.call(audit.ENRICHMENT_RETRY_DELAY_SECONDS),
+                mock.call(audit.ENRICHMENT_RETRY_DELAY_SECONDS),
+                mock.call(86400),
+            ],
+            sleep.call_args_list,
+        )
 
 
 if __name__ == "__main__":
