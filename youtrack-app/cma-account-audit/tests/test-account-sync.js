@@ -1065,6 +1065,9 @@ function testNewMemberOnboardingCreatesOneWelcomeTicketAndRetriesIdempotently() 
     welcome.summary,
     'Welcome to Cameron-Media — Your access is ready'
   );
+  assert.ok(welcome.description.startsWith(
+    '<!-- CamCore:CMA:onboarding:v1 -->\n\n## Welcome to Cameron-Media\n'
+  ));
   assert.match(welcome.description, /https:\/\/app\.plex\.tv\/desktop\//);
   assert.match(welcome.description, /https:\/\/www\.plex\.tv\/apps-devices\//);
   assert.ok(welcome.description.includes('https://camcore.au'));

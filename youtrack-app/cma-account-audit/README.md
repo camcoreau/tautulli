@@ -11,11 +11,21 @@ daily audit. Exact `Plex Username` matching is a one-time fallback that lets the
 first run backfill IDs onto tickets that predate the integration.
 
 When the worker sets `onboardingRequested=true`, the app plans one
-`Welcome to Cameron-Media — <username>` ticket at the non-message `Active`
+`Welcome to Cameron-Media — Your access is ready` ticket at the non-message `Active`
 stage. Its description is a member-facing welcome guide with links to the Plex
 Web App, Plex player apps and CamCore help. A retry that finds the same lifetime
 CMA ticket returns `onboarding-existing-ticket` without writing or sending a
 second notification.
+
+New onboarding descriptions carry `<!-- CamCore:CMA:onboarding:v1 -->` before
+the welcome heading. The separately reviewed confirmation-template proposal in
+`youtrack-notifications/cma-onboarding` uses this formatting marker together with
+the CMA issue ID and exact welcome summary. The marker is not an authorization
+boundary. It neither changes recipients nor sends an additional email. Existing
+tickets are not rewritten, marked or resent. New welcome tickets remain Solved.
+An app receipt proves ticket-side processing, not email delivery or content.
+The app and template are separate deployment gates; local preparation of 1.3.2
+does not mean either is live.
 
 New tickets are constructed with the unique YouTrack user whose email matches the
 Plex email. This preserves the Helpdesk reporter relationship so public comments

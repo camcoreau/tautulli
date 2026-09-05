@@ -256,6 +256,10 @@ function buildDescription(body) {
 
 function buildOnboardingDescription(body) {
   return [
+    // Versioned formatting marker for the CMA-only confirmation template.
+    // This is not an authorization boundary and never requests another send.
+    '<!-- CamCore:CMA:onboarding:v1 -->',
+    '',
     '## Welcome to Cameron-Media',
     '',
     'Hi ' + body.plexUsername + ',',
