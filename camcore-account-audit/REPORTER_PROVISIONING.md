@@ -1,83 +1,131 @@
-# CMA Helpdesk reporter provisioning
+# CMA Helpdesk Reporter provisioning
 
-> **STATUS: PARKED — not in use as of 4 September 2026. See OPS-271.**
->
-> This feature was armed and executed once, on 3 September 2026 at 20:06 AEST, creating two accounts intended to be Reporters that were subsequently observed to consume licence seats and were removed the following day.
->
-> Provisioning is gated on the in-source constant `REPORTER_PROVISIONING_ENABLED` in `runner.py`, currently `False`. While parked:
->
-> - `runner.main()` does **not** call `install()`. The ordinary `audit.YouTrackClient` stays active and `ReporterProvisioner` is never constructed, so its unconditional `YOUTRACK_HUB_URL` validation never runs either.
-> - Supplying `YOUTRACK_REPORTER_PROVISION_TOKEN` makes the worker **exit 2 at startup**, before the scheduled run loop begins, emitting `{"event": "startup-aborted"}` on stderr. It does not silently re-arm.
-> - Both `YOUTRACK_REPORTER_PROVISION_TOKEN` and `YOUTRACK_HUB_URL` have been removed from `compose.example.yml`.
->
-> Re-enabling requires a reviewed source change and a new pinned image. It cannot be done by configuration alone.
->
-> **Do not re-arm before resolving why accounts created with `userType: REPORTER` consumed licence seats.** Any test of that question must use a test instance or a staff-controlled synthetic identity, never a real member.
->
-> Reporter creation is currently a manual step performed at Plex onboarding time.
->
-> The sections below describe the feature as designed, and apply only if it is un-parked.
+> **Status: implemented, off by default (OPS-343).** Activation is a separately
+> approved production change recorded on OPS-343. Until then the worker behaves
+> exactly as accepted under OPS-271: a new Plex member with no matching YouTrack
+> account is skipped fail-closed with `reporter-match-unavailable`.
 
-The CMA account-audit worker can provision a missing YouTrack Helpdesk Reporter account when a genuinely new Plex member is first observed after the onboarding baseline.
+The CMA account-audit worker can create the missing YouTrack Helpdesk **Reporter**
+account for a genuinely new Plex member, so the member's lifetime welcome ticket
+and welcome email go out without a manual step.
 
 ## Why this exists
 
-A new Plex member may already be visible in Tautulli before they have ever contacted the CamCore Helpdesk. In that state the CMA YouTrack app cannot create the member's lifetime welcome ticket because `User.findUniqueByEmail(...)` has no reporter to attach to the ticket.
+A new Plex member is visible in Tautulli before they have ever contacted the
+CamCore Helpdesk. The CMA YouTrack app attaches the welcome ticket to the user
+that `User.findUniqueByEmail(...)` returns for the Plex email; with no such user
+it answers HTTP 422 and the worker skips the member every day.
 
-The production runner now treats that exact onboarding-only condition as recoverable. It creates a Reporter-type user in YouTrack Hub, waits for the account to become visible to YouTrack, and retries the same read-only suppress request. The normal notification gate still decides whether a welcome ticket can be created.
+## What changed since the parked design
 
-## Safety boundaries
+The first implementation (3 September 2026) created users through the Hub REST
+API with `userType: {"id": "REPORTER"}`. Since YouTrack 2026.1, Hub no longer
+persists the user type, so those accounts became licensed Standard users and
+consumed seats (OPS-271). JetBrains' current guidance for 2026.1+ is:
 
-Reporter provisioning is deliberately narrower than the CMA ticket-sync token.
+```
+POST /api/users?fields=id,login,fullName,email,userType(id)
+{"login": "...", "fullName": "...", "email": "...", "password": "...",
+ "userType": {"id": "REPORTER"}}
+```
 
-- `YOUTRACK_TOKEN` remains the CMA project-scoped token used by the account-sync app.
-- `YOUTRACK_REPORTER_PROVISION_TOKEN` must be a separate token. The runner rejects a configuration that reuses `YOUTRACK_TOKEN`.
-- The provisioning identity needs only the user-management permissions required to look up and create users: `Read User Basic` and `Create User`.
-- Do not grant the provisioning identity project roles, Support access, Operations access, or CMA issue mutation permissions.
-- Provisioning is attempted only when all of the following are true:
-  - the worker is live (`DRY_RUN=false`);
-  - the registry already marks the Plex account as pending onboarding;
-  - the YouTrack app returns the exact deterministic `reporter-match-unavailable` response;
-  - the request is the read-only `suppress` phase.
-- Dry-run never provisions users.
-- Permit mode never provisions users.
-- A non-exact or duplicate Hub email lookup fails closed.
-- The reporter login is deterministic from the stable Plex user ID and does not expose the member email address.
-- The member email is stored as an unverified contact. The automation does not falsely mark ownership of the email address as verified.
-- Reporter creation itself does not bypass the one-member-notification-per-24-hours gate. Welcome-ticket creation still requires the normal permit.
-- If the newly created Reporter account does not become a unique YouTrack email match after bounded read-only retries, the entire audit cycle fails closed instead of continuing with an ambiguous identity.
+`password` is required on create. This worker now uses exactly that call. The
+Hub path is gone; setting `YOUTRACK_HUB_URL` makes the worker refuse to start.
+
+## How it works
+
+Provisioning is attempted only when **all** of the following hold:
+
+- `REPORTER_PROVISIONING_ENABLED=true` **and** `YOUTRACK_REPORTER_PROVISION_TOKEN`
+  is set, and the token differs from `YOUTRACK_TOKEN`;
+- the worker is live (`DRY_RUN=false`);
+- the request is the read-only `suppress` planning pass;
+- the registry marks the Plex account as pending onboarding;
+- the CMA app returned the exact deterministic `reporter-match-unavailable`
+  response and the account has an email;
+- the per-cycle budget (`REPORTER_PROVISIONING_MAX_PER_CYCLE`, default 1) is not
+  yet spent; and
+- the process-wide circuit breaker has not tripped.
+
+When it runs:
+
+1. **Lookup first.** The worker enumerates `GET /api/users` page by page and
+   matches the email exactly (case-insensitive). Any existing account with that
+   email, of any type, means nothing is created; the member stays a deterministic
+   skip and a `reporter-provisioning-skipped` event names the reason
+   (`existing-account-not-unique-match`). If the directory is empty or exposes no
+   email at all (missing *Read User Details*), "no match" is not believed and the
+   cycle fails closed instead of creating duplicates.
+2. **Create.** `POST /api/users` with a deterministic login
+   (`cma-plex-<sha256(plexUserId)[:16]>`, never the email), the Plex username as
+   `fullName`, the Plex email, a random 32-byte password that is never logged,
+   stored or reused (Reporters authenticate by email link), and
+   `userType REPORTER`.
+3. **Verify.** The create response **and** a fresh `GET /api/users/{id}` readback
+   must both carry the requested login, exact email and `REPORTER` type.
+4. **Retry the plan.** The worker repeats the same read-only `suppress` request a
+   few times; the normal one-member-notification-per-24-hours gate then decides
+   when the welcome ticket is actually created. Provisioning never touches permit
+   mode, the allowance or the registry history.
+
+### Circuit breaker
+
+If step 3 finds anything other than the requested Reporter identity, the worker
+prints `reporter-provisioning-tripped` (with the account id and login, never the
+email) to stderr and disables provisioning for the rest of the process. At most
+one questionable account can therefore be created per worker lifetime. Correct
+or remove that account in *Administration → Users*, then restart the worker.
+
+### Events
+
+- `reporter-provisioning` — startup state (`enabled` / `disabled`, token present,
+  max per cycle).
+- `reporter-provisioned` — one account created and read back (id, login, type).
+- `reporter-provisioning-skipped` — `cycle-budget-exhausted` or
+  `existing-account-not-unique-match`.
+- `reporter-provisioning-tripped` — breaker tripped; see above.
 
 ## Required settings
 
 ```text
-YOUTRACK_REPORTER_PROVISION_TOKEN=<dedicated permanent token>
-YOUTRACK_HUB_URL=https://support.camcore.au/hub/api/rest
+REPORTER_PROVISIONING_ENABLED=true
+YOUTRACK_REPORTER_PROVISION_TOKEN=<dedicated permanent token, YouTrack service only>
+REPORTER_PROVISIONING_MAX_PER_CYCLE=1          # optional, default 1
+YOUTRACK_API_URL=https://support.camcore.au/api # optional; must be the sync host's /api
 ```
 
-`YOUTRACK_HUB_URL` defaults to `/hub/api/rest` on the same scheme and host as the configured YouTrack sync endpoint. The runner rejects a different host so the provisioning token cannot be sent to an unrelated service through configuration error.
+The provisioning identity needs only *Read User Basic*, *Create User* and *Read
+User Details* (email visibility) in Global. Do not grant it project roles,
+Support or Operations access, or CMA issue permissions.
 
-## Reactivation gate
+## Canary before activation
 
-There is **no approved production rollout procedure for this feature.** The previous rollout
-steps were removed deliberately: they restored the shared production worker to `DRY_RUN=false`
-before the canary, which would point a provisioning-enabled all-account worker at the live
-Tautulli inventory. That is the exact hazard this gate exists to prevent.
+`tools/reporter_provisioning_canary.py` ships in the image at
+`/app/tools/`. Run it from the container console with the worker's normal
+environment plus one synthetic identity:
 
-Before reporter provisioning may be reactivated:
+```text
+CANARY_PLEX_USER_ID=ops343-<anything>   # must start with ops343-
+CANARY_USERNAME=<display name>
+CANARY_EMAIL=<staff-controlled mailbox with NO YouTrack account>
 
-- Reporter provisioning remains **parked**. It has no approved production rollout procedure.
-- Reactivation requires a **separate reviewed PR and validation plan**, prepared only after the
-  cause of licence-seat consumption by accounts created with `userType: REPORTER` has been
-  resolved.
-- Any user-creation canary must run through an **isolated one-shot harness whose input contains
-  exactly one staff-controlled synthetic identity**.
-- **Never point a provisioning-enabled all-account worker at the live Tautulli inventory during a
-  canary.**
-- The **shared production worker stays unchanged throughout canary validation** - not
-  reconfigured, not restarted, not switched out of its current mode.
-- **Canary completion does not authorize production.** Activation requires separate explicit
-  approval.
+python /app/tools/reporter_provisioning_canary.py preview
+CANARY_CONFIRM=yes python /app/tools/reporter_provisioning_canary.py run
+```
+
+`preview` is read-only and reports user-type counts and whether the email already
+matches. `run` creates exactly one Reporter, reads it back, enumerates again and
+reports `accepted: true` only when the Reporter count rose by exactly one and no
+other user-type count changed. The canary never reads Tautulli, the registry or
+the CMA sync endpoint, and never prints a token, password or email address.
+
+Canary completion does not authorise production. Activation
+(`REPORTER_PROVISIONING_ENABLED=true` on the production worker) is a separate
+explicit approval on OPS-343.
 
 ## Rollback
 
-Remove `YOUTRACK_REPORTER_PROVISION_TOKEN` and redeploy or restart the worker. With no provisioning token the runner preserves the previous behavior: a missing reporter remains pending and is skipped with `reporter-match-unavailable` until the identity exists by another route.
+Set `REPORTER_PROVISIONING_ENABLED=false` (or remove the token) and redeploy.
+A missing Reporter is then skipped fail-closed until the identity exists by
+another route, exactly as before. Never reset the registry or the notification
+allowance history as part of a rollback.
