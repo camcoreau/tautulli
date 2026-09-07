@@ -13,9 +13,14 @@ services:
       YOUTRACK_URL: https://support.camcore.au
       YOUTRACK_PROJECT_ID: CMA
       YOUTRACK_TOKEN: ${YOUTRACK_TOKEN}
-      # OPS-271: reporter provisioning is parked. YOUTRACK_REPORTER_PROVISION_TOKEN
-      # and YOUTRACK_HUB_URL are deliberately absent - supplying the token to a
-      # parked build makes the worker exit 2 at startup. See REPORTER_PROVISIONING.md.
+      # OPS-343: automatic Helpdesk Reporter provisioning through YouTrack
+      # /api/users. Both settings are required to enable it; the defaults are off.
+      # The token must belong to the dedicated provisioning identity, never the
+      # CMA sync identity. Do not set YOUTRACK_HUB_URL - the Hub path was removed
+      # and its presence refuses startup. See REPORTER_PROVISIONING.md.
+      REPORTER_PROVISIONING_ENABLED: "false"
+      YOUTRACK_REPORTER_PROVISION_TOKEN: ${YOUTRACK_REPORTER_PROVISION_TOKEN:-}
+      REPORTER_PROVISIONING_MAX_PER_CYCLE: "1"
       INACTIVE_DAYS: "60"
       NEVER_USED_DAYS: "14"
       EXCLUDED_USERS: Guest,Local

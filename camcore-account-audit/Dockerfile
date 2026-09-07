@@ -7,12 +7,15 @@ WORKDIR /app
 
 COPY audit.py /app/audit.py
 COPY runner.py /app/runner.py
+# Operator-run diagnostics. Inert unless started by hand from the container
+# console; see REPORTER_PROVISIONING.md.
+COPY tools/reporter_provisioning_canary.py /app/tools/reporter_provisioning_canary.py
 
 RUN addgroup -S -g 10001 audit \
     && adduser -S -D -H -u 10001 -G audit audit \
     && mkdir -p /data \
     && chown audit:audit /data \
-    && python -m py_compile /app/audit.py /app/runner.py
+    && python -m py_compile /app/audit.py /app/runner.py /app/tools/reporter_provisioning_canary.py
 
 USER 10001:10001
 

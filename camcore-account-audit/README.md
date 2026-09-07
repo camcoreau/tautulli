@@ -174,6 +174,11 @@ using the existing Helpdesk reporter account that matches the Plex email address
 returns HTTP 422 rather than creating a ticket under the automation identity when
 there is no unique reporter match.
 
+When that 422 is returned for a member who is pending onboarding, the worker can
+create the missing Helpdesk Reporter itself through YouTrack `POST /api/users`
+and retry. This is off by default and needs a dedicated provisioning token; see
+`REPORTER_PROVISIONING.md` for the gates, the canary and the rollback.
+
 The service account behind `YOUTRACK_TOKEN` needs these CMA-only permissions:
 
 - Create Issue
