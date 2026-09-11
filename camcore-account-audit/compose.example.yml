@@ -16,8 +16,11 @@ services:
       # OPS-343: automatic Helpdesk Reporter provisioning through YouTrack
       # /api/users. Both settings are required to enable it; the defaults are off.
       # The token must belong to the dedicated provisioning identity, never the
-      # CMA sync identity. Do not set YOUTRACK_HUB_URL - the Hub path was removed
-      # and its presence refuses startup. See REPORTER_PROVISIONING.md.
+      # CMA sync identity, and must carry BOTH the "YouTrack Administration"
+      # (Hub) and "YouTrack" scopes - a YouTrack-only token creates the account
+      # but then hangs on the Hub export with HTTP 401 (OPS-343). Do not set
+      # YOUTRACK_HUB_URL - the Hub path was removed and its presence refuses
+      # startup. See REPORTER_PROVISIONING.md.
       REPORTER_PROVISIONING_ENABLED: "false"
       YOUTRACK_REPORTER_PROVISION_TOKEN: ${YOUTRACK_REPORTER_PROVISION_TOKEN:-}
       REPORTER_PROVISIONING_MAX_PER_CYCLE: "1"
