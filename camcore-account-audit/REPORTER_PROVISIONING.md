@@ -89,14 +89,32 @@ or remove that account in *Administration → Users*, then restart the worker.
 
 ```text
 REPORTER_PROVISIONING_ENABLED=true
-YOUTRACK_REPORTER_PROVISION_TOKEN=<dedicated permanent token, YouTrack service only>
+YOUTRACK_REPORTER_PROVISION_TOKEN=<dedicated permanent token; scopes: YouTrack Administration AND YouTrack>
 REPORTER_PROVISIONING_MAX_PER_CYCLE=1          # optional, default 1
 YOUTRACK_API_URL=https://support.camcore.au/api # optional; must be the sync host's /api
 ```
 
+### Token scopes
+
+The token must carry **both** the *YouTrack Administration* (Hub, service
+`0-0-0-0-0`) and *YouTrack* scopes. A YouTrack-only token is not sufficient:
+`POST /api/users` creates the account server-side but the Hub export then fails
+with HTTP 401 `requires the 0-0-0-0-0 scope`, and the client blocks until it
+times out. The account exists but the worker never receives its readback, so the
+run neither succeeds nor cleanly fails.
+
+This was established the hard way on the night of 7/8 September 2026 (OPS-343):
+a token issued with the YouTrack scope alone passed `preview` — which only
+enumerates users — and then hung on `run`. `preview` passing does **not** prove
+the token can create.
+
+### Identity permissions
+
 The provisioning identity needs only *Read User Basic*, *Create User* and *Read
 User Details* (email visibility) in Global. Do not grant it project roles,
-Support or Operations access, or CMA issue permissions.
+Support or Operations access, or CMA issue permissions. Scopes and permissions
+are separate concerns: the permissions above govern what the identity may do,
+the scopes above govern which services the token may speak to at all.
 
 ## Canary before activation
 
