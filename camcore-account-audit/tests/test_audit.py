@@ -1997,6 +1997,126 @@ class RunOnceTests(unittest.TestCase):
             self.assertEqual(NOW.isoformat(), saved["lastCompletedAt"])
             self.assertNotIn("memberNotificationGate", saved)
 
+    # OPS-402: a deterministic failure attributable to one member's own data
+    # must not withhold the cycle's permit from every other member. Regression
+    # for the bonny597 HTTP 409 that silenced all notifications 8-10 Sep 2026.
+    MEMBER_SCOPED_409 = (
+        "The existing CMA ticket reporter does not match the incoming Plex email"
+    )
+
+    @classmethod
+    def raise_member_scoped_409(cls):
+        detail = json.dumps({"error": cls.MEMBER_SCOPED_409})
+        raise audit.RemoteHttpError(
+            f"POST sync-account returned HTTP 409: {detail}",
+            status_code=409,
+            detail=detail,
+        )
+
+    def test_member_scoped_failure_isolates_and_preserves_permit(self):
+        accounts = [
+            self.inactive_account(username="bad-record", user_id="1"),
+            self.inactive_account(username="good-member", user_id="2"),
+        ]
+
+        def responder(target, _decision, mode, cycle_id):
+            if target.user_id == "1":
+                self.raise_member_scoped_409()
+            if mode == audit.NOTIFICATION_MODE_SUPPRESS:
+                return deferred_receipt(
+                    cycle_id=cycle_id,
+                    plex_user_id=target.user_id,
+                    planned_action="notice-started",
+                )
+            return sync_receipt(
+                notification_mode=audit.NOTIFICATION_MODE_PERMIT,
+                cycle_id=cycle_id,
+                plex_user_id=target.user_id,
+                planned_action="notice-started",
+                permit_required=True,
+                permit_reserved=True,
+                budget_remaining=0,
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            exit_code, calls, stdout, stderr = self.run_worker(
+                accounts=accounts,
+                registry_path=path,
+                responder=responder,
+            )
+
+            self.assertEqual(0, exit_code, stderr)
+            self.assertIn('"errors": 0', stdout)
+            self.assertIn('"memberScopedErrors": 1', stdout)
+            self.assertIn(
+                '"youtrackSuppressFailed": "reporter-email-mismatch"',
+                stdout,
+            )
+            self.assertNotIn("blocked-by-suppress-errors", stdout)
+            # The failure stays visible on stderr, tagged as member-scoped.
+            self.assertIn('"scope": "member"', stderr)
+            self.assertIn('"reason": "reporter-email-mismatch"', stderr)
+            # The healthy member still received its permitted notification.
+            self.assertIn(
+                audit.NOTIFICATION_MODE_PERMIT,
+                [call["notification_mode"] for call in calls],
+            )
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(NOW.isoformat(), saved["lastCompletedAt"])
+
+    def test_widespread_member_scoped_failures_escalate_to_systemic(self):
+        accounts = [
+            self.inactive_account(username=f"member-{index}", user_id=str(index))
+            for index in range(1, 8)
+        ]
+
+        def responder(_target, _decision, _mode, _cycle_id):
+            self.raise_member_scoped_409()
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            exit_code, _calls, stdout, stderr = self.run_worker(
+                accounts=accounts,
+                registry_path=path,
+                responder=responder,
+            )
+
+            # Seven affected accounts exceeds the isolation bound, so the cycle
+            # falls back to the OPS-271 cycle-wide fail-closed behaviour.
+            self.assertEqual(1, exit_code)
+            self.assertIn('"memberScopedErrors": 7', stdout)
+            self.assertIn('"errors": 7', stdout)
+            self.assertIn("blocked-by-suppress-errors", stdout)
+            self.assertIn('"scope": "member"', stderr)
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertNotEqual(NOW.isoformat(), saved.get("lastCompletedAt"))
+
+    def test_member_scoped_failure_affecting_every_member_is_systemic(self):
+        # Small member base: two accounts, both failing the same way. The
+        # absolute bound is not reached, but nothing is left working, so this
+        # is systemic rather than isolated.
+        accounts = [
+            self.inactive_account(username="one", user_id="1"),
+            self.inactive_account(username="two", user_id="2"),
+        ]
+
+        def responder(_target, _decision, _mode, _cycle_id):
+            self.raise_member_scoped_409()
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            exit_code, _calls, stdout, _stderr = self.run_worker(
+                accounts=accounts,
+                registry_path=path,
+                responder=responder,
+            )
+
+            self.assertEqual(1, exit_code)
+            self.assertIn('"memberScopedErrors": 2', stdout)
+            self.assertIn('"errors": 2', stdout)
+            self.assertIn("blocked-by-suppress-errors", stdout)
+
     def test_identity_rejection_near_miss_still_blocks_all_permits(self):
         accounts = [
             self.inactive_account(username="candidate", user_id="1"),
