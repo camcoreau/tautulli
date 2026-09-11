@@ -23,6 +23,10 @@ DEFAULT_USER_AGENT = "CamCore-CMA-Account-Audit/1.0"
 JS_MAX_SAFE_INTEGER = (2**53) - 1
 MAX_FUTURE_CLOCK_SKEW = timedelta(minutes=5)
 MEMBER_NOTIFICATION_WINDOW = timedelta(hours=24)
+# Upper sanity bound on the ceiling the CMA app may advertise. The worker
+# honours whatever the app advertises up to this bound (OPS-371); it no
+# longer hard-codes 1. Anything above this is treated as a protocol fault.
+MAX_MEMBER_NOTIFICATION_LIMIT = 50
 NOTIFICATION_POLICY_VERSION = 1
 NOTIFICATION_PROTOCOL_ID = "cma-account-audit-member-notification"
 NOTIFICATION_PROTOCOL_MODES = ("suppress", "permit")
@@ -755,15 +759,69 @@ class Registry:
             )
         return observed_at - reserved_at >= MEMBER_NOTIFICATION_WINDOW
 
+    def notification_permits_remaining(
+        self,
+        observed_at: datetime,
+        notification_limit: int = 1,
+    ) -> int:
+        """Member-notification permits still available in the trailing window.
+
+        The worker no longer assumes a ceiling of one (OPS-371). It counts the
+        reservations it has actually made inside MEMBER_NOTIFICATION_WINDOW and
+        subtracts them from the ceiling the CMA app advertised for this cycle.
+
+        At notification_limit == 1 this is exactly the previous behaviour: the
+        single gate reservation and its history entry are written together, so
+        "no reservation in the last 24 hours" and "fewer than one reservation
+        in the last 24 hours" are the same condition.
+        """
+        if notification_limit < 1:
+            raise ConfigurationError("Member-notification limit must be at least 1")
+        # Validates timestamps and future-clock skew for both structures.
+        available = self.notification_permit_available(observed_at)
+        observed_at = observed_at.astimezone(UTC)
+        window_start = observed_at - MEMBER_NOTIFICATION_WINDOW
+        reserved_in_window = 0
+        for reserved_at_raw in self._notification_permit_history().values():
+            reserved_at = datetime.fromisoformat(reserved_at_raw).astimezone(UTC)
+            if reserved_at > window_start:
+                reserved_in_window += 1
+        remaining = notification_limit - reserved_in_window
+        if notification_limit == 1 and not available:
+            # Preserve the historical gate semantics exactly at a ceiling of one.
+            remaining = 0
+        return max(0, remaining)
+
+    def member_notification_available(
+        self,
+        account: Account,
+        observed_at: datetime,
+    ) -> bool:
+        """True when this member has had no notification in the trailing window.
+
+        With a ceiling above one the global budget no longer implies a per-member
+        limit, so this is what stops a single member being notified repeatedly
+        inside one window (OPS-371).
+        """
+        last = self.last_notification_permit_at(account, observed_at)
+        if last == datetime.min.replace(tzinfo=UTC):
+            return True
+        return observed_at.astimezone(UTC) - last >= MEMBER_NOTIFICATION_WINDOW
+
     def reserve_notification_permit(
         self,
         *,
         cycle_id: str,
         account: Account,
         observed_at: datetime,
+        notification_limit: int = 1,
     ) -> None:
-        if not self.notification_permit_available(observed_at):
+        if self.notification_permits_remaining(observed_at, notification_limit) <= 0:
             raise ConfigurationError("Member-notification permit is already reserved")
+        if not self.member_notification_available(account, observed_at):
+            raise ConfigurationError(
+                "Member-notification permit is already reserved for this member"
+            )
         self.data["memberNotificationGate"] = {
             "policyVersion": NOTIFICATION_POLICY_VERSION,
             "cycleId": cycle_id,
@@ -902,6 +960,7 @@ def validate_sync_response(
     cycle_id: str,
     plex_user_id: str,
     onboarding_requested: bool,
+    notification_limit: int = 1,
 ) -> dict[str, Any]:
     if not isinstance(response, dict):
         raise RemoteApiError("YouTrack account sync returned an invalid response")
@@ -932,7 +991,8 @@ def validate_sync_response(
     if (
         isinstance(remaining, bool)
         or not isinstance(remaining, int)
-        or remaining not in (0, 1)
+        or remaining < 0
+        or remaining > notification_limit
     ):
         raise RemoteApiError("YouTrack account sync returned an invalid notification budget")
 
@@ -990,7 +1050,7 @@ def validate_sync_response(
                     raise RemoteApiError(
                         "Permit mode returned a contradictory notification receipt"
                     )
-                if remaining != 0:
+                if remaining >= notification_limit:
                     raise RemoteApiError("Permit mode did not consume its notification budget")
             elif not exhausted or remaining != 0:
                 raise RemoteApiError(
@@ -1041,7 +1101,8 @@ def validate_protocol_response(response: Any) -> dict[str, Any]:
     if (
         isinstance(member_limit, bool)
         or not isinstance(member_limit, int)
-        or member_limit != 1
+        or member_limit < 1
+        or member_limit > MAX_MEMBER_NOTIFICATION_LIMIT
     ):
         raise RemoteApiError("YouTrack account sync notification limit is incompatible")
     window_seconds = response.get("memberNotificationWindowSeconds")
@@ -1268,7 +1329,7 @@ def run_once(config: Config, observed_at: datetime | None = None) -> int:
         # This read-only endpoint does not exist in the legacy app. Prove exact
         # suppress/permit compatibility after enrichment and before registry load
         # or any account sync request.
-        validate_protocol_response(youtrack.protocol())
+        protocol = validate_protocol_response(youtrack.protocol())
         return _run_once_locked(
             config,
             observed_at,
@@ -1276,6 +1337,7 @@ def run_once(config: Config, observed_at: datetime | None = None) -> int:
             registry,
             accounts=accounts,
             cycle_id=cycle_id,
+            notification_limit=protocol["memberNotificationLimit"],
         )
 
 
@@ -1287,11 +1349,13 @@ def _run_once_locked(
     *,
     accounts: list[Account],
     cycle_id: str,
+    notification_limit: int = 1,
 ) -> int:
     registry.load()
 
     errors = 0
     member_scoped_errors = 0
+    permits_issued = 0
     processed = 0
     excluded = 0
     entries: list[dict[str, Any]] = []
@@ -1362,6 +1426,7 @@ def _run_once_locked(
                 cycle_id=cycle_id,
                 plex_user_id=account.user_id,
                 onboarding_requested=entry["onboardingRequested"],
+                notification_limit=notification_limit,
             )
             event["youtrackSuppress"] = response
             if response["onboardingCompleted"]:
@@ -1430,6 +1495,8 @@ def _run_once_locked(
                     "excluded": excluded,
                     "errors": errors,
                     "memberScopedErrors": member_scoped_errors,
+                    "memberNotificationLimit": notification_limit,
+                    "memberNotificationsIssued": permits_issued,
                     "notificationCandidates": len(candidates),
                     "notificationPermitStatus": (
                         "dry-run-preview"
@@ -1451,71 +1518,97 @@ def _run_once_locked(
     # unnecessarily deferred until the following day. Keep observed_at fixed
     # for account classification and fail safely if the clock moves backwards.
     permit_attempt_at = max(observed_at.astimezone(UTC), utc_now())
-    permit_available = registry.notification_permit_available(permit_attempt_at)
-    if errors == 0 and candidates and permit_available:
-        selected = min(
-            candidates,
-            key=lambda item: (
-                candidate_priority(item["suppress"]),
-                registry.last_notification_permit_at(item["account"], observed_at),
-                item["account"].username.casefold(),
-                item["account"].user_id,
-            ),
-        )
-        selected_account = selected["account"]
-        registry.reserve_notification_permit(
-            cycle_id=cycle_id,
-            account=selected_account,
-            observed_at=permit_attempt_at,
-        )
-        permit_status = "reserved"
-        try:
-            permit_response = youtrack.sync(
-                selected_account,
-                selected["decision"],
-                onboarding_requested=selected["onboardingRequested"],
-                notification_mode=NOTIFICATION_MODE_PERMIT,
-                cycle_id=cycle_id,
-            )
-            permit_response = validate_sync_response(
-                permit_response,
-                notification_mode=NOTIFICATION_MODE_PERMIT,
-                cycle_id=cycle_id,
-                plex_user_id=selected_account.user_id,
-                onboarding_requested=selected["onboardingRequested"],
-            )
-            selected["event"]["youtrackPermit"] = permit_response
-            if permit_response["onboardingCompleted"]:
-                registry.confirm_onboarding(selected_account)
-                selected["onboardingRequested"] = False
-            if permit_response["memberNotificationPermitReserved"]:
-                permit_status = "confirmed"
-            elif permit_response.get("action") == NOTIFICATION_BUDGET_EXHAUSTED_ACTION:
-                permit_status = "server-budget-exhausted"
-            else:
-                permit_status = "no-longer-required"
-            registry.confirm_notification_permit(
-                cycle_id=cycle_id,
-                status=permit_status,
-            )
-        except RemoteApiError as exc:
-            errors += 1
-            permit_status = "ambiguous-failure"
-            print(
-                json.dumps(
-                    {
-                        "event": "sync-error",
-                        "phase": NOTIFICATION_MODE_PERMIT,
-                        "username": selected_account.username,
-                        "message": str(exc),
-                    }
-                ),
-                file=sys.stderr,
-            )
-    elif errors == 0 and candidates and not permit_available:
-        permit_status = "local-budget-exhausted"
-    elif errors:
+    permits_remaining = registry.notification_permits_remaining(
+        permit_attempt_at, notification_limit
+    )
+    if errors:
         permit_status = "blocked-by-suppress-errors"
+    elif candidates and permits_remaining <= 0:
+        permit_status = "local-budget-exhausted"
+    elif candidates:
+        # The ceiling is whatever the CMA app advertised for this cycle
+        # (OPS-371). A member who has already been notified inside the window is
+        # not eligible again, so one member cannot consume the whole allowance.
+        pending = [
+            item
+            for item in candidates
+            if registry.member_notification_available(
+                item["account"], permit_attempt_at
+            )
+        ]
+        if not pending:
+            permit_status = "local-budget-exhausted"
+        while pending and permits_remaining > 0:
+            selected = min(
+                pending,
+                key=lambda item: (
+                    candidate_priority(item["suppress"]),
+                    registry.last_notification_permit_at(item["account"], observed_at),
+                    item["account"].username.casefold(),
+                    item["account"].user_id,
+                ),
+            )
+            pending.remove(selected)
+            selected_account = selected["account"]
+            registry.reserve_notification_permit(
+                cycle_id=cycle_id,
+                account=selected_account,
+                observed_at=permit_attempt_at,
+                notification_limit=notification_limit,
+            )
+            permits_remaining -= 1
+            permit_status = "reserved"
+            try:
+                permit_response = youtrack.sync(
+                    selected_account,
+                    selected["decision"],
+                    onboarding_requested=selected["onboardingRequested"],
+                    notification_mode=NOTIFICATION_MODE_PERMIT,
+                    cycle_id=cycle_id,
+                )
+                permit_response = validate_sync_response(
+                    permit_response,
+                    notification_mode=NOTIFICATION_MODE_PERMIT,
+                    cycle_id=cycle_id,
+                    plex_user_id=selected_account.user_id,
+                    onboarding_requested=selected["onboardingRequested"],
+                    notification_limit=notification_limit,
+                )
+                selected["event"]["youtrackPermit"] = permit_response
+                if permit_response["onboardingCompleted"]:
+                    registry.confirm_onboarding(selected_account)
+                    selected["onboardingRequested"] = False
+                if permit_response["memberNotificationPermitReserved"]:
+                    permit_status = "confirmed"
+                    permits_issued += 1
+                elif permit_response.get("action") == NOTIFICATION_BUDGET_EXHAUSTED_ACTION:
+                    permit_status = "server-budget-exhausted"
+                else:
+                    permit_status = "no-longer-required"
+                registry.confirm_notification_permit(
+                    cycle_id=cycle_id,
+                    status=permit_status,
+                )
+                if permit_status == "server-budget-exhausted":
+                    # The app is the authority on the ceiling. Stop asking.
+                    break
+            except RemoteApiError as exc:
+                errors += 1
+                permit_status = "ambiguous-failure"
+                print(
+                    json.dumps(
+                        {
+                            "event": "sync-error",
+                            "phase": NOTIFICATION_MODE_PERMIT,
+                            "username": selected_account.username,
+                            "message": str(exc),
+                        }
+                    ),
+                    file=sys.stderr,
+                )
+                # Fail closed for the rest of the cycle rather than issuing
+                # further notifications on an uncertain outbound state.
+                break
 
     for entry in entries:
         print(json.dumps(entry["event"], sort_keys=True))
@@ -1531,6 +1624,8 @@ def _run_once_locked(
                 "excluded": excluded,
                 "errors": errors,
                 "memberScopedErrors": member_scoped_errors,
+                "memberNotificationLimit": notification_limit,
+                "memberNotificationsIssued": permits_issued,
                 "notificationCandidates": len(candidates),
                 "notificationPermitStatus": permit_status,
             },
