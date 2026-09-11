@@ -1265,7 +1265,13 @@ class ProtocolReceiptTests(unittest.TestCase):
             lambda value: value.__setitem__("onboardingProtocolVersion", True),
             lambda value: value.__setitem__("onboardingProtocolVersion", 2),
             lambda value: value.__setitem__("memberNotificationLimit", True),
-            lambda value: value.__setitem__("memberNotificationLimit", 2),
+            # A ceiling above one is now honoured (OPS-371); zero, negative and
+            # absurd ceilings are still protocol faults.
+            lambda value: value.__setitem__("memberNotificationLimit", 0),
+            lambda value: value.__setitem__("memberNotificationLimit", -1),
+            lambda value: value.__setitem__(
+                "memberNotificationLimit", audit.MAX_MEMBER_NOTIFICATION_LIMIT + 1
+            ),
             lambda value: value.__setitem__("memberNotificationWindowSeconds", 1.0),
             lambda value: value.__setitem__("memberNotificationWindowSeconds", 3600),
         ]
@@ -1540,7 +1546,7 @@ class RunOnceTests(unittest.TestCase):
         unsafe_responses = [
             audit.RemoteApiError("GET protocol returned HTTP 404"),
             {"result": "legacy-account-sync"},
-            protocol_receipt(memberNotificationLimit=2),
+            protocol_receipt(memberNotificationLimit=0),
         ]
         with tempfile.TemporaryDirectory() as directory:
             for index, unsafe in enumerate(unsafe_responses):
@@ -1795,6 +1801,166 @@ class RunOnceTests(unittest.TestCase):
             self.assertEqual("confirmed", saved["memberNotificationGate"]["status"])
             self.assertEqual("2", saved["memberNotificationGate"]["plexUserId"])
             self.assertEqual(NOW.isoformat(), saved["lastCompletedAt"])
+
+    def _three_candidates(self):
+        accounts = [
+            self.inactive_account(username="zeta", user_id="3"),
+            self.inactive_account(username="alpha", user_id="1"),
+            self.inactive_account(username="beta", user_id="2"),
+        ]
+        planned_actions = {
+            "1": "notice-started",
+            "2": "notice-started",
+            "3": "notice-started",
+        }
+
+        def make_responder(budgets):
+            remaining = iter(budgets)
+
+            def responder(target, _decision, mode, cycle_id):
+                planned_action = planned_actions[target.user_id]
+                if mode == audit.NOTIFICATION_MODE_SUPPRESS:
+                    return deferred_receipt(
+                        cycle_id=cycle_id,
+                        plex_user_id=target.user_id,
+                        planned_action=planned_action,
+                    )
+                return sync_receipt(
+                    notification_mode=audit.NOTIFICATION_MODE_PERMIT,
+                    cycle_id=cycle_id,
+                    plex_user_id=target.user_id,
+                    planned_action=planned_action,
+                    permit_required=True,
+                    permit_reserved=True,
+                    budget_remaining=next(remaining),
+                )
+
+            return responder
+
+        return accounts, make_responder
+
+    def test_advertised_ceiling_above_one_issues_several_permits_in_one_cycle(self):
+        """OPS-371: the worker honours the ceiling the app advertises."""
+        accounts, make_responder = self._three_candidates()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            exit_code, calls, _, _ = self.run_worker(
+                accounts=accounts,
+                registry_path=path,
+                responder=make_responder([14, 13, 12]),
+                protocol_response=protocol_receipt(memberNotificationLimit=15),
+            )
+            self.assertEqual(0, exit_code)
+            permit_calls = [
+                item
+                for item in calls
+                if item["notification_mode"] == audit.NOTIFICATION_MODE_PERMIT
+            ]
+            self.assertEqual(3, len(permit_calls))
+            # Every member is notified once, none of them twice.
+            self.assertEqual(
+                {"1", "2", "3"},
+                {item["account"].user_id for item in permit_calls},
+            )
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual("confirmed", saved["memberNotificationGate"]["status"])
+            self.assertEqual(3, len(saved["memberNotificationPermitHistory"]))
+
+    def test_advertised_ceiling_is_never_exceeded_in_one_cycle(self):
+        accounts, make_responder = self._three_candidates()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            exit_code, calls, _, _ = self.run_worker(
+                accounts=accounts,
+                registry_path=path,
+                responder=make_responder([1, 0]),
+                protocol_response=protocol_receipt(memberNotificationLimit=2),
+            )
+            self.assertEqual(0, exit_code)
+            permit_calls = [
+                item
+                for item in calls
+                if item["notification_mode"] == audit.NOTIFICATION_MODE_PERMIT
+            ]
+            self.assertEqual(2, len(permit_calls))
+
+    def test_a_member_is_not_notified_twice_inside_the_window(self):
+        """The per-member rule, not the global one, is what stops repeats."""
+        accounts, make_responder = self._three_candidates()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "users": {},
+                        "memberNotificationPermitHistory": {
+                            "2": (NOW - timedelta(hours=3)).isoformat(),
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            exit_code, calls, _, _ = self.run_worker(
+                accounts=accounts,
+                registry_path=path,
+                responder=make_responder([13, 12]),
+                protocol_response=protocol_receipt(memberNotificationLimit=15),
+            )
+            self.assertEqual(0, exit_code)
+            permit_calls = [
+                item
+                for item in calls
+                if item["notification_mode"] == audit.NOTIFICATION_MODE_PERMIT
+            ]
+            notified = {item["account"].user_id for item in permit_calls}
+            self.assertEqual({"1", "3"}, notified)
+            self.assertNotIn("2", notified)
+
+    def test_a_permit_failure_stops_the_cycle_before_further_notifications(self):
+        """Fail closed: an uncertain outbound state ends the cycle."""
+        accounts, _ = self._three_candidates()
+        sent = []
+
+        def responder(target, _decision, mode, cycle_id):
+            if mode == audit.NOTIFICATION_MODE_SUPPRESS:
+                return deferred_receipt(
+                    cycle_id=cycle_id,
+                    plex_user_id=target.user_id,
+                    planned_action="notice-started",
+                )
+            sent.append(target.user_id)
+            if len(sent) == 2:
+                raise audit.RemoteApiError("POST account-sync timed out")
+            return sync_receipt(
+                notification_mode=audit.NOTIFICATION_MODE_PERMIT,
+                cycle_id=cycle_id,
+                plex_user_id=target.user_id,
+                planned_action="notice-started",
+                permit_required=True,
+                permit_reserved=True,
+                budget_remaining=14,
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            exit_code, calls, _, _ = self.run_worker(
+                accounts=accounts,
+                registry_path=path,
+                responder=responder,
+                protocol_response=protocol_receipt(memberNotificationLimit=15),
+            )
+            self.assertEqual(1, exit_code)
+            permit_calls = [
+                item
+                for item in calls
+                if item["notification_mode"] == audit.NOTIFICATION_MODE_PERMIT
+            ]
+            # Two attempts, then the cycle stops. The third member is untouched.
+            self.assertEqual(2, len(permit_calls))
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            # The ambiguous reservation stays reserved and is not retried.
+            self.assertEqual("reserved", saved["memberNotificationGate"]["status"])
 
     def test_read_only_plan_is_not_selected_over_a_notification_candidate(self):
         accounts = [
