@@ -103,7 +103,24 @@ DETERMINISTIC_IDENTITY_REJECTIONS = {
 }
 
 
-def deterministic_identity_skip_reason(exc: RemoteApiError) -> str | None:
+# Failures that are definitely attributable to one member's own data. These are
+# recorded and the member is skipped, but they do NOT withhold the cycle's
+# member-notification permit: one member's bad record must not silence the
+# service for every other member (OPS-402).
+DETERMINISTIC_MEMBER_SCOPED_FAILURES = {
+    (
+        409,
+        "The existing CMA ticket reporter does not match the incoming Plex email",
+    ): "reporter-email-mismatch",
+}
+
+# Beyond this bound a "member-scoped" pattern is no longer credibly per-member,
+# so the cycle escalates to the OPS-271 fail-closed behaviour.
+MEMBER_SCOPED_FAILURE_MAX_ACCOUNTS = 5
+
+
+def structured_error_key(exc: RemoteApiError) -> tuple[int, str] | None:
+    """Return (status_code, message) for a structured single-error response."""
     if not isinstance(exc, RemoteHttpError):
         return None
     try:
@@ -115,7 +132,37 @@ def deterministic_identity_skip_reason(exc: RemoteApiError) -> str | None:
     message = payload.get("error")
     if not isinstance(message, str):
         return None
-    return DETERMINISTIC_IDENTITY_REJECTIONS.get((exc.status_code, message))
+    return (exc.status_code, message)
+
+
+def deterministic_identity_skip_reason(exc: RemoteApiError) -> str | None:
+    key = structured_error_key(exc)
+    if key is None:
+        return None
+    return DETERMINISTIC_IDENTITY_REJECTIONS.get(key)
+
+
+def deterministic_member_scoped_failure_reason(exc: RemoteApiError) -> str | None:
+    key = structured_error_key(exc)
+    if key is None:
+        return None
+    return DETERMINISTIC_MEMBER_SCOPED_FAILURES.get(key)
+
+
+def member_scoped_failures_are_systemic(count: int, processed: int) -> bool:
+    """True when member-scoped failures are too widespread to treat as isolated.
+
+    A proportional bound is deliberately not used: on a small member base one
+    genuinely isolated failure can be a large fraction of the cycle, and
+    escalating on that would reintroduce the very cycle-wide outage OPS-402
+    exists to prevent. Only an absolute count, or every processed member
+    failing the same way, is treated as systemic.
+    """
+    if count <= 0:
+        return False
+    if count > MEMBER_SCOPED_FAILURE_MAX_ACCOUNTS:
+        return True
+    return processed > 0 and count >= processed
 
 
 def is_youtrack_transaction_conflict(payload: Any) -> bool:
@@ -1244,6 +1291,7 @@ def _run_once_locked(
     registry.load()
 
     errors = 0
+    member_scoped_errors = 0
     processed = 0
     excluded = 0
     entries: list[dict[str, Any]] = []
@@ -1328,18 +1376,45 @@ def _run_once_locked(
                 event["youtrackSuppressSkipped"] = skip_reason
                 processed += 1
                 continue
+            failure_reason = deterministic_member_scoped_failure_reason(exc)
+            if failure_reason is not None:
+                # Attributable to this member's own data. Record it and move on;
+                # the cycle keeps its permit so other members are unaffected.
+                event["youtrackSuppressFailed"] = failure_reason
+                member_scoped_errors += 1
+                processed += 1
+                print(
+                    json.dumps(
+                        {
+                            "event": "sync-error",
+                            "phase": NOTIFICATION_MODE_SUPPRESS,
+                            "scope": "member",
+                            "reason": failure_reason,
+                            "username": account.username,
+                            "message": str(exc),
+                        }
+                    ),
+                    file=sys.stderr,
+                )
+                continue
             errors += 1
             print(
                 json.dumps(
                     {
                         "event": "sync-error",
                         "phase": NOTIFICATION_MODE_SUPPRESS,
+                        "scope": "systemic",
                         "username": account.username,
                         "message": str(exc),
                     }
                 ),
                 file=sys.stderr,
             )
+
+    # A pattern of member-scoped failures that is too broad is not isolated any
+    # more; fall back to the OPS-271 cycle-wide fail-closed behaviour.
+    if member_scoped_failures_are_systemic(member_scoped_errors, processed):
+        errors += member_scoped_errors
 
     if config.dry_run:
         for entry in entries:
@@ -1354,6 +1429,7 @@ def _run_once_locked(
                     "processed": processed,
                     "excluded": excluded,
                     "errors": errors,
+                    "memberScopedErrors": member_scoped_errors,
                     "notificationCandidates": len(candidates),
                     "notificationPermitStatus": (
                         "dry-run-preview"
@@ -1454,6 +1530,7 @@ def _run_once_locked(
                 "processed": processed,
                 "excluded": excluded,
                 "errors": errors,
+                "memberScopedErrors": member_scoped_errors,
                 "notificationCandidates": len(candidates),
                 "notificationPermitStatus": permit_status,
             },
