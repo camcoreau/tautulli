@@ -13,6 +13,7 @@ EXPECTED_GLOBAL_PROPERTIES = {
     "cmaMemberNotificationReservedAt": "integer",
     "cmaMemberNotificationCycleId": "string",
     "cmaMemberNotificationPlexUserId": "string",
+    "cmaMemberNotificationReservations": "string",
 }
 
 
@@ -26,8 +27,8 @@ def validate_declarations(source: Path) -> None:
     manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
     if manifest.get("name") != "cma-account-audit":
         raise SystemExit("The account-audit app identity must remain cma-account-audit")
-    if manifest.get("version") != "1.3.2":
-        raise SystemExit("The reviewed account-audit app version must be 1.3.2")
+    if manifest.get("version") != "1.3.3":
+        raise SystemExit("The reviewed account-audit app version must be 1.3.3")
     if manifest.get("minYouTrackVersion") != "2025.3.0":
         raise SystemExit("The account-audit app must require global-storage support")
 
