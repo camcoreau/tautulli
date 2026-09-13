@@ -11,6 +11,9 @@
         },
         "cmaMemberNotificationPlexUserId": {
           "type": "string"
+        },
+        "cmaMemberNotificationReservations": {
+          "type": "string"
         }
       }
     }

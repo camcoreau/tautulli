@@ -80,17 +80,31 @@ facts, create tickets, pulse audit freshness, change review stages, write
 `planned` receipt without writes.
 
 After a clean suppress pass, the worker may repeat exactly one selected
-candidate in `permit` mode. The app atomically stores one permit in
+candidate in `permit` mode. The app atomically stores a permit in
 `AppGlobalStorage` before issue side effects. That server-side reservation
-allows at most one member notification across all workers in a rolling 24-hour
-window, measured from its `reservedAt` timestamp. If the window has not elapsed,
-the endpoint returns `deferred/member-notification-budget-exhausted` with no
-issue writes. If the operation is no longer a candidate, permit mode also returns
-`planned` without reserving or writing. Thus issue mutations occur only after a
-required global permit has been successfully reserved. A local registry
-reservation provides a second durable gate and is
-persisted before the permit request, so network ambiguity cannot safely be
-retried as a new notification.
+list allows at most `memberNotificationLimit` (15) member notifications across
+all workers, each counted independently in its own rolling 24-hour window
+measured from its own `reservedAt` timestamp — a reservation ages out of the
+count 24 hours after it was made, regardless of any other reservation's age.
+If all 15 slots are occupied by reservations still inside their window, the
+endpoint returns `deferred/member-notification-budget-exhausted` with no issue
+writes. If the operation is no longer a candidate, permit mode also returns
+`planned` without reserving or writing. Thus issue mutations occur only after
+a required global permit has been successfully reserved. A local registry
+reservation provides a second durable gate and is persisted before the permit
+request, so network ambiguity cannot safely be retried as a new notification.
+
+The reservation list is stored as a single JSON-encoded `AppGlobalStorage`
+string property (`cmaMemberNotificationReservations`). The three single-slot
+properties used before app version 1.3.3
+(`cmaMemberNotificationReservedAt`/`CycleId`/`PlexUserId`) remain declared and
+are read once, as a fallback, only while the list property has never been
+written. Installing 1.3.3 in place does not drop or reopen a reservation that
+was already live under the previous single-slot policy: the first permit
+granted after the upgrade folds any still-active legacy reservation into the
+new list alongside the new one, and the list is authoritative from that point
+on. An expired legacy reservation is simply not carried forward, the same as
+any other expired entry.
 
 Install this app update before deploying a worker that uses the protocol. The
 new live worker deliberately rejects a missing or incompatible read-only

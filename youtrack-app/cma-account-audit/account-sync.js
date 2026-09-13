@@ -4,7 +4,8 @@ const search = require('@jetbrains/youtrack-scripting-api/search');
 const PROJECT_ID = 'CMA';
 const MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
 const MEMBER_NOTIFICATION_WINDOW_MS = 24 * 60 * 60 * 1000;
-const NOTIFICATION_POLICY_VERSION = 1;
+const MEMBER_NOTIFICATION_LIMIT = 15;
+const NOTIFICATION_POLICY_VERSION = 2;
 const NOTIFICATION_PROTOCOL_ID = 'cma-account-audit-member-notification';
 const ONBOARDING_PROTOCOL_VERSION = 1;
 const NOTIFICATION_MODE_SUPPRESS = 'suppress';
@@ -385,11 +386,44 @@ function globalBudgetStorage(ctx) {
   return ctx.globalStorage.extensionProperties;
 }
 
-function notificationBudget(ctx, now) {
-  const storage = globalBudgetStorage(ctx);
+function isValidReservationShape(entry, now) {
+  return Boolean(entry) && typeof entry === 'object' &&
+    Number.isSafeInteger(entry.reservedAt) && entry.reservedAt > 0 &&
+    entry.reservedAt <= now &&
+    CYCLE_ID_PATTERN.test(entry.cycleId || '') &&
+    typeof entry.plexUserId === 'string' && Boolean(entry.plexUserId.trim());
+}
+
+// Reads the versioned multi-reservation list. Returns null when the property
+// has never been written, which callers use to fall back to the pre-1.3.3
+// single-slot fields below. Any recognized-but-corrupt array fails closed
+// rather than silently discarding a possibly-live reservation.
+function storedReservations(storage, now) {
+  const raw = storage.cmaMemberNotificationReservations;
+  if (raw === null || raw === undefined) {
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error('CMA member-notification budget reservation list is invalid');
+  }
+  if (!Array.isArray(parsed) ||
+      !parsed.every(function(entry) { return isValidReservationShape(entry, now); })) {
+    throw new Error('CMA member-notification budget reservation list is invalid');
+  }
+  return parsed;
+}
+
+// Pre-1.3.3 deployments only ever held a single reservation across three
+// scalar fields. Those fields are kept declared (never removed) so a
+// currently-live reservation made before this update is still honored the
+// first time the budget is read after upgrade.
+function legacyReservation(storage, now) {
   const reservedAt = storage.cmaMemberNotificationReservedAt;
   if (reservedAt === null || reservedAt === undefined || reservedAt === 0) {
-    return {storage: storage, available: true, remaining: 1};
+    return null;
   }
   if (!Number.isSafeInteger(reservedAt) || reservedAt <= 0 || reservedAt > now) {
     throw new Error('CMA member-notification budget timestamp is invalid');
@@ -399,16 +433,50 @@ function notificationBudget(ctx, now) {
       !storage.cmaMemberNotificationPlexUserId.trim()) {
     throw new Error('CMA member-notification budget reservation is invalid');
   }
-  const available = now - reservedAt >= MEMBER_NOTIFICATION_WINDOW_MS;
-  return {storage: storage, available: available, remaining: available ? 1 : 0};
+  return {
+    reservedAt: reservedAt,
+    cycleId: storage.cmaMemberNotificationCycleId,
+    plexUserId: storage.cmaMemberNotificationPlexUserId
+  };
+}
+
+// The array field is authoritative the instant it exists (even as an empty
+// list): that only happens once this version has itself written a
+// reservation, at which point any pre-upgrade legacy reservation has already
+// been folded in by reserveNotificationBudget below. Until then, the legacy
+// scalar fields are the only record of a possibly-still-active reservation.
+function currentReservations(storage, now) {
+  const migrated = storedReservations(storage, now);
+  if (migrated !== null) {
+    return migrated;
+  }
+  const legacy = legacyReservation(storage, now);
+  return legacy ? [legacy] : [];
+}
+
+function notificationBudget(ctx, now) {
+  const storage = globalBudgetStorage(ctx);
+  const active = currentReservations(storage, now).filter(function(entry) {
+    return now - entry.reservedAt < MEMBER_NOTIFICATION_WINDOW_MS;
+  });
+  const remaining = Math.max(0, MEMBER_NOTIFICATION_LIMIT - active.length);
+  return {storage: storage, active: active, available: remaining > 0, remaining: remaining};
 }
 
 function reserveNotificationBudget(budget, body, now) {
-  budget.storage.cmaMemberNotificationReservedAt = now;
-  budget.storage.cmaMemberNotificationCycleId = body.cycleId;
-  budget.storage.cmaMemberNotificationPlexUserId = body.plexUserId;
+  // budget.active already excludes expired entries (including an expired
+  // legacy reservation), so this write is also the one-time migration point:
+  // any still-active legacy reservation is carried into the array alongside
+  // the new one, and the array becomes authoritative from here on.
+  const updated = budget.active.concat([{
+    reservedAt: now,
+    cycleId: body.cycleId,
+    plexUserId: body.plexUserId
+  }]);
+  budget.storage.cmaMemberNotificationReservations = JSON.stringify(updated);
+  budget.active = updated;
   budget.available = false;
-  budget.remaining = 0;
+  budget.remaining = Math.max(0, MEMBER_NOTIFICATION_LIMIT - updated.length);
 }
 
 function receipt(
@@ -435,7 +503,7 @@ function protocolReceipt() {
     appName: NOTIFICATION_PROTOCOL_ID,
     notificationPolicyVersion: NOTIFICATION_POLICY_VERSION,
     notificationModes: [NOTIFICATION_MODE_SUPPRESS, NOTIFICATION_MODE_PERMIT],
-    memberNotificationLimit: 1,
+    memberNotificationLimit: MEMBER_NOTIFICATION_LIMIT,
     memberNotificationWindowSeconds: MEMBER_NOTIFICATION_WINDOW_MS / 1000,
     onboardingProtocolVersion: ONBOARDING_PROTOCOL_VERSION
   };
