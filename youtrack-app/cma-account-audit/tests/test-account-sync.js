@@ -252,7 +252,7 @@ function assertNoMutation() {
 }
 
 function assertReceipt(payload, expected) {
-  assert.strictEqual(payload.notificationPolicyVersion, 1);
+  assert.strictEqual(payload.notificationPolicyVersion, 2);
   assert.strictEqual(payload.notificationMode, expected.mode);
   assert.strictEqual(payload.cycleId, expected.cycleId || DEFAULT_CYCLE_ID);
   assert.strictEqual(
@@ -364,7 +364,7 @@ function testHealthyAccountDoesNotCreateOrStampATicket() {
     mode: 'permit',
     required: false,
     reserved: false,
-    remaining: 1
+    remaining: 15
   });
   assertNoMutation();
 }
@@ -376,9 +376,9 @@ function testProtocolEndpointIsExactReadOnlyAndCmaScoped() {
   assert.strictEqual(ctx.response.code, 200);
   assert.deepStrictEqual(ctx.response.payload, {
     appName: 'cma-account-audit-member-notification',
-    notificationPolicyVersion: 1,
+    notificationPolicyVersion: 2,
     notificationModes: ['suppress', 'permit'],
-    memberNotificationLimit: 1,
+    memberNotificationLimit: 15,
     memberNotificationWindowSeconds: 24 * 60 * 60,
     onboardingProtocolVersion: 1
   });
@@ -468,7 +468,7 @@ function testNewReviewCreationAndFirstNoticeUseSeparatePermits() {
     mode: 'permit',
     required: true,
     reserved: true,
-    remaining: 0
+    remaining: 14
   });
 
   const created = runtime.created[0];
@@ -492,7 +492,7 @@ function testNewReviewCreationAndFirstNoticeUseSeparatePermits() {
     cycleId: 'audit-00000000000000000000000000000002',
     required: true,
     reserved: true,
-    remaining: 0
+    remaining: 14
   });
 }
 
@@ -583,7 +583,7 @@ function testAuditCallerMustDifferFromReporter() {
     mode: 'permit',
     required: true,
     reserved: true,
-    remaining: 0
+    remaining: 14
   });
   assert.strictEqual(runtime.created.length, 1);
 }
@@ -706,7 +706,7 @@ function testActivityRetainsAStagedTicketBeforeItsFirstNotice() {
     mode: 'suppress',
     required: true,
     reserved: false,
-    remaining: 1
+    remaining: 15
   });
   assert.strictEqual(existing.fields['Review Stage'].name, 'Active');
   assert.strictEqual(existing.fields['Account Status'].name, 'Inactive');
@@ -726,7 +726,7 @@ function testActivityRetainsAStagedTicketBeforeItsFirstNotice() {
     mode: 'permit',
     required: true,
     reserved: true,
-    remaining: 0
+    remaining: 14
   });
 }
 
@@ -780,7 +780,7 @@ function testPermitModeNonCandidateIsCompletelyReadOnly() {
     mode: 'permit',
     required: false,
     reserved: false,
-    remaining: 1
+    remaining: 15
   });
   assertNoMutation();
 }
@@ -803,7 +803,7 @@ function testSuppressDefersNewCandidateWithoutAnyMutation() {
     mode: 'suppress',
     required: true,
     reserved: false,
-    remaining: 1
+    remaining: 15
   });
   assertNoMutation();
 }
@@ -835,7 +835,7 @@ function testSuppressConservativelyDefersEveryMessageStage() {
       mode: 'suppress',
       required: true,
       reserved: false,
-      remaining: 1
+      remaining: 15
     });
     assertNoMutation();
   });
@@ -858,13 +858,13 @@ function testSuppressPlansSafeExistingFactsWithoutMutation() {
       mode: 'suppress',
       required: false,
       reserved: false,
-      remaining: 1
+      remaining: 15
     });
     assertNoMutation();
   });
 }
 
-function testPermitReservesBeforeSideEffectsAndExhaustsForTwentyFourHours() {
+function testPermitReservesIntoArrayStorageAndTracksMultipleSlots() {
   resetRuntime();
   runtime.reporters['member@example.com'] = MEMBER;
   let ctx = context(validBody());
@@ -880,25 +880,93 @@ function testPermitReservesBeforeSideEffectsAndExhaustsForTwentyFourHours() {
     mode: 'permit',
     required: true,
     reserved: true,
-    remaining: 0
+    remaining: 14
   });
-  assert.strictEqual(runtime.globalStorage.cmaMemberNotificationReservedAt, NOW);
-  assert.strictEqual(
-    runtime.globalStorage.cmaMemberNotificationCycleId,
-    DEFAULT_CYCLE_ID
-  );
-  assert.strictEqual(
-    runtime.globalStorage.cmaMemberNotificationPlexUserId,
-    'plex-123'
-  );
+  // The legacy single-slot fields are never written by this version.
+  assert.strictEqual(runtime.globalStorage.cmaMemberNotificationReservedAt, undefined);
+  assert.strictEqual(runtime.globalStorage.cmaMemberNotificationCycleId, undefined);
+  assert.strictEqual(runtime.globalStorage.cmaMemberNotificationPlexUserId, undefined);
   assert.deepStrictEqual(
-    runtime.effects.slice(0, 4).map(function(effect) { return effect.type; }),
-    ['global', 'global', 'global', 'issue-create']
+    JSON.parse(runtime.globalStorage.cmaMemberNotificationReservations),
+    [{reservedAt: NOW, cycleId: DEFAULT_CYCLE_ID, plexUserId: 'plex-123'}]
+  );
+  // One JSON-array write replaces the three separate scalar writes the
+  // single-slot policy used to make, and it still happens before any issue
+  // side effect.
+  assert.deepStrictEqual(
+    runtime.effects.slice(0, 2).map(function(effect) { return effect.type; }),
+    ['global', 'issue-create']
   );
 
   const targetProject = project('CMA');
-  const blocked = existingIssue(targetProject, {
+  const second = existingIssue(targetProject, {
     id: 'CMA-3',
+    stage: 'Final Reminder',
+    confirmedAt: 123
+  });
+  runtime.matches = {};
+  runtime.reporters = {};
+  matchExisting(second);
+  runtime.created = [];
+  runtime.mutations = [];
+  runtime.globalMutations = [];
+  runtime.effects = [];
+  ctx = context(validBody({
+    cycleId: 'audit-00000000000000000000000000000002'
+  }), targetProject);
+  handler(ctx);
+
+  // A second concurrent member is still well inside the 15-slot ceiling, so
+  // this permit succeeds instead of deferring.
+  assert.strictEqual(ctx.response.payload.result, 'updated');
+  assert.strictEqual(ctx.response.payload.action, 'review-already-in-progress');
+  assert.strictEqual(second.fields['Account Audit Confirmed At'], runtime.now);
+  assertReceipt(ctx.response.payload, {
+    mode: 'permit',
+    cycleId: 'audit-00000000000000000000000000000002',
+    required: true,
+    reserved: true,
+    remaining: 13
+  });
+  assert.strictEqual(
+    JSON.parse(runtime.globalStorage.cmaMemberNotificationReservations).length,
+    2
+  );
+}
+
+function testFifteenConcurrentReservationsFillTheCeilingAndTheSixteenthIsBlocked() {
+  resetRuntime();
+  const targetProject = project('CMA');
+  const preExisting = [];
+  for (let i = 0; i < 14; i += 1) {
+    preExisting.push({
+      reservedAt: NOW - (i * 1000),
+      cycleId: 'audit-' + String(i).padStart(32, '0'),
+      plexUserId: 'plex-seed-' + i
+    });
+  }
+  runtime.globalStorage.cmaMemberNotificationReservations = JSON.stringify(preExisting);
+
+  runtime.reporters['member@example.com'] = MEMBER;
+  let ctx = context(validBody(), targetProject);
+  handler(ctx);
+
+  // The 15th concurrent reservation is still permitted; it exactly fills
+  // the ceiling advertised by the protocol endpoint.
+  assert.strictEqual(ctx.response.payload.result, 'created');
+  assertReceipt(ctx.response.payload, {
+    mode: 'permit',
+    required: true,
+    reserved: true,
+    remaining: 0
+  });
+  assert.strictEqual(
+    JSON.parse(runtime.globalStorage.cmaMemberNotificationReservations).length,
+    15
+  );
+
+  const blocked = existingIssue(targetProject, {
+    id: 'CMA-16',
     stage: 'Final Reminder',
     confirmedAt: 123
   });
@@ -910,7 +978,7 @@ function testPermitReservesBeforeSideEffectsAndExhaustsForTwentyFourHours() {
   runtime.globalMutations = [];
   runtime.effects = [];
   ctx = context(validBody({
-    cycleId: 'audit-00000000000000000000000000000002'
+    cycleId: 'audit-00000000000000000000000000000099'
   }), targetProject);
   handler(ctx);
 
@@ -923,30 +991,123 @@ function testPermitReservesBeforeSideEffectsAndExhaustsForTwentyFourHours() {
   assert.strictEqual(blocked.fields['Account Audit Confirmed At'], 123);
   assertReceipt(ctx.response.payload, {
     mode: 'permit',
-    cycleId: 'audit-00000000000000000000000000000002',
+    cycleId: 'audit-00000000000000000000000000000099',
     required: true,
     reserved: false,
     remaining: 0
   });
   assertNoMutation();
+}
 
-  runtime.now += DAY;
-  ctx = context(validBody({
-    cycleId: 'audit-00000000000000000000000000000003'
-  }), targetProject);
+function testEachReservationExpiresIndependentlyOnItsOwnRollingWindow() {
+  resetRuntime();
+  const targetProject = project('CMA');
+  const seeded = [];
+  for (let i = 0; i < 15; i += 1) {
+    seeded.push({
+      // 5 slots are already more than 24 hours old; the other 10 are fresh.
+      // Each must age out on its own timestamp, not as a group.
+      reservedAt: i < 5 ? NOW - DAY - 1000 : NOW - 1000,
+      cycleId: 'audit-' + String(i).padStart(32, '0'),
+      plexUserId: 'plex-seed-' + i
+    });
+  }
+  runtime.globalStorage.cmaMemberNotificationReservations = JSON.stringify(seeded);
+  runtime.globalMutations = [];
+  runtime.effects = [];
+
+  let ctx = context(null, targetProject);
+  protocolHandler(ctx);
+  assert.strictEqual(ctx.response.code, 200);
+  assertNoMutation();
+
+  runtime.reporters['member@example.com'] = MEMBER;
+  ctx = context(validBody(), targetProject);
   handler(ctx);
-  assert.strictEqual(ctx.response.payload.result, 'updated');
+
+  assert.strictEqual(ctx.response.payload.result, 'created');
   assertReceipt(ctx.response.payload, {
     mode: 'permit',
-    cycleId: 'audit-00000000000000000000000000000003',
     required: true,
     reserved: true,
-    remaining: 0
+    remaining: 4
   });
-  assert.strictEqual(
-    runtime.globalStorage.cmaMemberNotificationReservedAt,
-    NOW + DAY
-  );
+  const stored = JSON.parse(runtime.globalStorage.cmaMemberNotificationReservations);
+  // The 5 stale entries are dropped on write; only the 10 still-active ones
+  // plus the new reservation remain.
+  assert.strictEqual(stored.length, 11);
+  assert.ok(stored.every(function(entry) { return entry.reservedAt > NOW - DAY; }));
+}
+
+function testLegacyReservationMigratesIntoArrayExactlyOnceWithoutLossOrDuplication() {
+  resetRuntime();
+  seedGlobalBudget(NOW - DAY + 1000);
+
+  // Before this version has written anything, the legacy single-slot fields
+  // are still the sole record of a possibly-live reservation and must be
+  // honored, not silently dropped or reopened.
+  let ctx = context(null);
+  protocolHandler(ctx);
+  assert.strictEqual(ctx.response.code, 200);
+  assert.strictEqual(runtime.globalStorage.cmaMemberNotificationReservations, undefined);
+
+  runtime.reporters['second-member@example.com'] = OTHER_MEMBER;
+  ctx = context(validBody({
+    plexUserId: 'plex-456',
+    plexUsername: 'other-member',
+    email: 'second-member@example.com',
+    cycleId: 'audit-00000000000000000000000000000009'
+  }));
+  handler(ctx);
+
+  assert.strictEqual(ctx.response.payload.result, 'created');
+  assertReceipt(ctx.response.payload, {
+    mode: 'permit',
+    cycleId: 'audit-00000000000000000000000000000009',
+    required: true,
+    reserved: true,
+    remaining: 13,
+    plexUserId: 'plex-456'
+  });
+
+  const migrated = JSON.parse(runtime.globalStorage.cmaMemberNotificationReservations);
+  assert.strictEqual(migrated.length, 2);
+  assert.deepStrictEqual(migrated[0], {
+    reservedAt: NOW - DAY + 1000,
+    cycleId: DEFAULT_CYCLE_ID,
+    plexUserId: 'plex-previous'
+  });
+  assert.strictEqual(migrated[1].plexUserId, 'plex-456');
+
+  // Once the array exists it is authoritative: corrupting the now-inert
+  // legacy fields must not fail-close a budget read that no longer uses them.
+  runtime.globalStorage.cmaMemberNotificationCycleId = 'not-a-cycle-id';
+  ctx = context(null);
+  protocolHandler(ctx);
+  assert.strictEqual(ctx.response.code, 200);
+}
+
+function testMalformedReservationArrayFailsClosed() {
+  const invalidPayloads = [
+    'not-json',
+    JSON.stringify({not: 'an-array'}),
+    JSON.stringify([{reservedAt: -1, cycleId: DEFAULT_CYCLE_ID, plexUserId: 'plex-x'}]),
+    JSON.stringify([{reservedAt: NOW + 1, cycleId: DEFAULT_CYCLE_ID, plexUserId: 'plex-x'}]),
+    JSON.stringify([{reservedAt: NOW, cycleId: 'not-a-cycle-id', plexUserId: 'plex-x'}]),
+    JSON.stringify([{reservedAt: NOW, cycleId: DEFAULT_CYCLE_ID, plexUserId: ''}])
+  ];
+
+  invalidPayloads.forEach(function(raw) {
+    resetRuntime();
+    runtime.globalStorage.cmaMemberNotificationReservations = raw;
+    runtime.globalMutations = [];
+    runtime.effects = [];
+    const ctx = context(validBody({accountStatus: 'Active', reviewNeeded: false}));
+    handler(ctx);
+    assert.strictEqual(ctx.response.code, 503, raw);
+    assert.match(ctx.response.payload.error, /reservation list/, raw);
+    assertNoMutation();
+  });
 }
 
 function testMalformedOrFutureBudgetFailsClosed() {
@@ -1013,7 +1174,7 @@ function testHealthyReceiptReportsAnExistingServerReservation() {
     mode: 'suppress',
     required: false,
     reserved: false,
-    remaining: 0
+    remaining: 14
   });
   assertNoMutation();
 }
@@ -1041,7 +1202,7 @@ function testNewMemberOnboardingCreatesOneWelcomeTicketAndRetriesIdempotently() 
     mode: 'suppress',
     required: true,
     reserved: false,
-    remaining: 1,
+    remaining: 15,
     onboardingRequested: true,
     onboardingCompleted: false
   });
@@ -1055,7 +1216,7 @@ function testNewMemberOnboardingCreatesOneWelcomeTicketAndRetriesIdempotently() 
     mode: 'permit',
     required: true,
     reserved: true,
-    remaining: 0,
+    remaining: 14,
     onboardingRequested: true,
     onboardingCompleted: true
   });
@@ -1097,7 +1258,7 @@ function testNewMemberOnboardingCreatesOneWelcomeTicketAndRetriesIdempotently() 
     cycleId: 'audit-00000000000000000000000000000002',
     required: false,
     reserved: false,
-    remaining: 0,
+    remaining: 14,
     onboardingRequested: true,
     onboardingCompleted: true
   });
@@ -1129,7 +1290,11 @@ try {
   testSuppressDefersNewCandidateWithoutAnyMutation();
   testSuppressConservativelyDefersEveryMessageStage();
   testSuppressPlansSafeExistingFactsWithoutMutation();
-  testPermitReservesBeforeSideEffectsAndExhaustsForTwentyFourHours();
+  testPermitReservesIntoArrayStorageAndTracksMultipleSlots();
+  testFifteenConcurrentReservationsFillTheCeilingAndTheSixteenthIsBlocked();
+  testEachReservationExpiresIndependentlyOnItsOwnRollingWindow();
+  testLegacyReservationMigratesIntoArrayExactlyOnceWithoutLossOrDuplication();
+  testMalformedReservationArrayFailsClosed();
   testMalformedOrFutureBudgetFailsClosed();
   testHealthyReceiptReportsAnExistingServerReservation();
   testNewMemberOnboardingCreatesOneWelcomeTicketAndRetriesIdempotently();
