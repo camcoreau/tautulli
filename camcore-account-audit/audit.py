@@ -27,6 +27,28 @@ MEMBER_NOTIFICATION_WINDOW = timedelta(hours=24)
 # honours whatever the app advertises up to this bound (OPS-371); it no
 # longer hard-codes 1. Anything above this is treated as a protocol fault.
 MAX_MEMBER_NOTIFICATION_LIMIT = 50
+# Member-notification policy versions this worker understands. The CMA app
+# advertises one of these at the protocol handshake and repeats it on every
+# account-sync receipt. Anything outside this set — including a future version
+# this build has never seen — is a protocol fault and still fails closed.
+#
+# OPS-371: this was a single pinned value of 1. When the CMA app moved to
+# version 2 the worker refused every handshake and CMA sync was fail-closed for
+# 13h48m (13-14 September 2026). The ceiling and the policy version are separate
+# contract terms and are now validated separately, with messages that name the
+# field and the value received.
+SUPPORTED_NOTIFICATION_POLICY_VERSIONS = frozenset({1, 2})
+# The policy version this worker WRITES into the registry's
+# memberNotificationGate. Deliberately pinned to the lowest supported version so
+# that a gate record written by this build stays readable by the previous build:
+# rolling the worker back must never be blocked by a registry record this build
+# created. The gate's policy version is an integrity marker on a transient
+# reservation, not a record of the advertised contract — the cycle log carries
+# that. Raise this only together with an explicit decision to give up rollback
+# to a pre-version-2 worker.
+NOTIFICATION_GATE_POLICY_VERSION = 1
+# Retained as the baseline version this worker is compatible with. Historical
+# version-1 records keep their meaning and must stay readable.
 NOTIFICATION_POLICY_VERSION = 1
 NOTIFICATION_PROTOCOL_ID = "cma-account-audit-member-notification"
 NOTIFICATION_PROTOCOL_MODES = ("suppress", "permit")
@@ -708,10 +730,12 @@ class Registry:
         if (
             isinstance(policy_version, bool)
             or not isinstance(policy_version, int)
-            or policy_version != NOTIFICATION_POLICY_VERSION
+            or policy_version not in SUPPORTED_NOTIFICATION_POLICY_VERSIONS
         ):
             raise ConfigurationError(
-                f"Invalid memberNotificationGate policy version in {self.path}"
+                f"memberNotificationGate policy version {policy_version!r} is not "
+                f"supported (worker supports "
+                f"{_supported_policy_versions_text()}) in {self.path}"
             )
         if not isinstance(gate.get("cycleId"), str) or not gate["cycleId"].strip():
             raise ConfigurationError(
@@ -823,7 +847,7 @@ class Registry:
                 "Member-notification permit is already reserved for this member"
             )
         self.data["memberNotificationGate"] = {
-            "policyVersion": NOTIFICATION_POLICY_VERSION,
+            "policyVersion": NOTIFICATION_GATE_POLICY_VERSION,
             "cycleId": cycle_id,
             "plexUserId": account.user_id,
             "reservedAt": observed_at.isoformat(),
@@ -968,9 +992,13 @@ def validate_sync_response(
     if (
         isinstance(policy_version, bool)
         or not isinstance(policy_version, int)
-        or policy_version != NOTIFICATION_POLICY_VERSION
+        or policy_version not in SUPPORTED_NOTIFICATION_POLICY_VERSIONS
     ):
-        raise RemoteApiError("YouTrack account sync notification policy is incompatible")
+        raise RemoteApiError(
+            f"YouTrack account sync notification policy version "
+            f"{policy_version!r} is not supported (worker supports "
+            f"{_supported_policy_versions_text()})"
+        )
     if response.get("notificationMode") != notification_mode:
         raise RemoteApiError("YouTrack account sync returned the wrong notification mode")
     if response.get("cycleId") != cycle_id:
@@ -1068,6 +1096,38 @@ def validate_sync_response(
     return response
 
 
+def _supported_policy_versions_text() -> str:
+    return ", ".join(str(version) for version in sorted(SUPPORTED_NOTIFICATION_POLICY_VERSIONS))
+
+
+def report_protocol_handshake(protocol: dict[str, Any], *, cycle_id: str) -> None:
+    """Record the accepted contract at cycle start.
+
+    OPS-371: without this line a refused handshake produced a two-line cycle
+    naming neither the field nor the value, and the cause of a 13h48m outage
+    could not be read from the worker's own log.
+    """
+    print(
+        json.dumps(
+            {
+                "event": "protocol-handshake",
+                "cycleId": cycle_id,
+                "accepted": True,
+                "memberNotificationLimit": protocol["memberNotificationLimit"],
+                "notificationPolicyVersion": protocol["notificationPolicyVersion"],
+                "memberNotificationWindowSeconds": protocol[
+                    "memberNotificationWindowSeconds"
+                ],
+                "supportedNotificationPolicyVersions": sorted(
+                    SUPPORTED_NOTIFICATION_POLICY_VERSIONS
+                ),
+                "maxMemberNotificationLimit": MAX_MEMBER_NOTIFICATION_LIMIT,
+            },
+            sort_keys=True,
+        )
+    )
+
+
 def validate_protocol_response(response: Any) -> dict[str, Any]:
     expected_keys = {
         "appName",
@@ -1085,9 +1145,13 @@ def validate_protocol_response(response: Any) -> dict[str, Any]:
     if (
         isinstance(policy_version, bool)
         or not isinstance(policy_version, int)
-        or policy_version != NOTIFICATION_POLICY_VERSION
+        or policy_version not in SUPPORTED_NOTIFICATION_POLICY_VERSIONS
     ):
-        raise RemoteApiError("YouTrack account sync notification policy is incompatible")
+        raise RemoteApiError(
+            f"YouTrack account sync notification policy version "
+            f"{policy_version!r} is not supported (worker supports "
+            f"{_supported_policy_versions_text()})"
+        )
     if response.get("notificationModes") != list(NOTIFICATION_PROTOCOL_MODES):
         raise RemoteApiError("YouTrack account sync protocol modes are incompatible")
     onboarding_version = response.get("onboardingProtocolVersion")
@@ -1104,7 +1168,10 @@ def validate_protocol_response(response: Any) -> dict[str, Any]:
         or member_limit < 1
         or member_limit > MAX_MEMBER_NOTIFICATION_LIMIT
     ):
-        raise RemoteApiError("YouTrack account sync notification limit is incompatible")
+        raise RemoteApiError(
+            f"YouTrack account sync memberNotificationLimit {member_limit!r} is "
+            f"outside the accepted range 1-{MAX_MEMBER_NOTIFICATION_LIMIT}"
+        )
     window_seconds = response.get("memberNotificationWindowSeconds")
     if (
         isinstance(window_seconds, bool)
@@ -1330,6 +1397,7 @@ def run_once(config: Config, observed_at: datetime | None = None) -> int:
         # suppress/permit compatibility after enrichment and before registry load
         # or any account sync request.
         protocol = validate_protocol_response(youtrack.protocol())
+        report_protocol_handshake(protocol, cycle_id=cycle_id)
         return _run_once_locked(
             config,
             observed_at,
