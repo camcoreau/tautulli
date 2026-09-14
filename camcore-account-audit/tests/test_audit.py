@@ -2557,6 +2557,115 @@ class RunOnceTests(unittest.TestCase):
                         audit.Registry(path).load()
 
 
+    # ---------------------------------------------------------------- OPS-371
+    # Notification policy version 2. See NotificationPolicyVersionTests below
+    # for the unit-level contract; these two exercise a whole cycle.
+
+    def test_unsupported_policy_version_contacts_nobody_and_writes_nothing(self):
+        """A policy version this build has never seen must still fail closed."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            original = {
+                "schemaVersion": 1,
+                "users": {},
+                "memberNotificationPermitHistory": {},
+                "lastCompletedAt": (NOW - timedelta(days=1)).isoformat(),
+            }
+            path.write_text(json.dumps(original), encoding="utf-8")
+            with self.assertRaises(audit.RemoteApiError) as caught:
+                self.run_worker(
+                    accounts=[self.inactive_account(username="member", user_id="42")],
+                    registry_path=path,
+                    responder=lambda *_args: (_ for _ in ()).throw(
+                        AssertionError("a member was contacted after a refused handshake")
+                    ),
+                    protocol_response=protocol_receipt(
+                        notificationPolicyVersion=3,
+                        memberNotificationLimit=15,
+                    ),
+                )
+            message = str(caught.exception)
+            self.assertIn("3", message)
+            self.assertIn("not supported", message)
+            # No reservation, no history, no gate - the registry is untouched.
+            self.assertEqual(original, json.loads(path.read_text(encoding="utf-8")))
+
+    def test_policy_version_two_runs_and_logs_the_accepted_handshake(self):
+        """The failing case of 13 September: ceiling 15 with policy version 2."""
+        accounts, make_responder = self._three_candidates()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            exit_code, calls, stdout, _ = self.run_worker(
+                accounts=accounts,
+                registry_path=path,
+                responder=make_responder([14, 13, 12]),
+                protocol_response=protocol_receipt(
+                    notificationPolicyVersion=2,
+                    memberNotificationLimit=15,
+                ),
+            )
+            self.assertEqual(0, exit_code)
+            permit_calls = [
+                item
+                for item in calls
+                if item["notification_mode"] == audit.NOTIFICATION_MODE_PERMIT
+            ]
+            self.assertEqual(3, len(permit_calls))
+
+            events = [json.loads(line) for line in stdout.splitlines()]
+            handshakes = [
+                event for event in events if event["event"] == "protocol-handshake"
+            ]
+            self.assertEqual(1, len(handshakes))
+            handshake = handshakes[0]
+            self.assertTrue(handshake["accepted"])
+            self.assertEqual(2, handshake["notificationPolicyVersion"])
+            self.assertEqual(15, handshake["memberNotificationLimit"])
+            self.assertEqual(
+                sorted(audit.SUPPORTED_NOTIFICATION_POLICY_VERSIONS),
+                handshake["supportedNotificationPolicyVersions"],
+            )
+            # The handshake is reported before any account is evaluated.
+            self.assertLess(
+                events.index(handshake),
+                min(
+                    index
+                    for index, event in enumerate(events)
+                    if event["event"] == "evaluated"
+                ),
+            )
+
+    def test_gate_is_written_at_the_rollback_safe_policy_version(self):
+        """The gate this build writes must stay readable by the previous build.
+
+        audit.py writes policyVersion into memberNotificationGate and refuses to
+        read a gate whose version it does not know. Writing the advertised
+        version 2 here would make the registry unreadable to the deployed
+        version-1 worker and silently break rollback, so the written value is
+        pinned to NOTIFICATION_GATE_POLICY_VERSION regardless of what the app
+        advertises.
+        """
+        accounts, make_responder = self._three_candidates()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.json"
+            exit_code, _, _, _ = self.run_worker(
+                accounts=accounts,
+                registry_path=path,
+                responder=make_responder([14, 13, 12]),
+                protocol_response=protocol_receipt(
+                    notificationPolicyVersion=2,
+                    memberNotificationLimit=15,
+                ),
+            )
+            self.assertEqual(0, exit_code)
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(1, audit.NOTIFICATION_GATE_POLICY_VERSION)
+            self.assertEqual(
+                audit.NOTIFICATION_GATE_POLICY_VERSION,
+                saved["memberNotificationGate"]["policyVersion"],
+            )
+
+
 class RunLoopEnrichmentTests(unittest.TestCase):
     @staticmethod
     def failure(reason="invalid-home-user-flag"):
@@ -2721,6 +2830,173 @@ class RunLoopEnrichmentTests(unittest.TestCase):
             sleep.call_args_list,
         )
 
+class NotificationPolicyVersionTests(unittest.TestCase):
+    """OPS-371: the ceiling and the policy version are separate contract terms.
+
+    Pinning notificationPolicyVersion to exactly 1 took CMA account sync down
+    fail-closed for 13h48m on 13-14 September 2026 when the CMA app moved to
+    version 2. Each term is now validated independently, a known-version set is
+    accepted, unknown versions still fail closed, and every message names the
+    field and the value received.
+    """
+
+    SUPPORTED_COMBINATIONS = [
+        # (memberNotificationLimit, notificationPolicyVersion)
+        (1, 1),   # the pre-1.3.3 production contract
+        (15, 2),  # the combination that failed on 13 September
+        (1, 2),   # versions and ceilings are independent
+        (15, 1),  # the same, in the other direction
+    ]
+
+    def test_handshake_accepts_every_supported_ceiling_and_policy_combination(self):
+        for limit, version in self.SUPPORTED_COMBINATIONS:
+            with self.subTest(limit=limit, version=version):
+                receipt = protocol_receipt(
+                    memberNotificationLimit=limit,
+                    notificationPolicyVersion=version,
+                )
+                self.assertIs(receipt, audit.validate_protocol_response(receipt))
+
+    def test_handshake_rejects_unknown_policy_versions_and_names_the_value(self):
+        # An unknown FUTURE version must keep failing closed. This is the
+        # correct behaviour, not the bug - the bug was refusing a known one.
+        for version in [3, 50, 0, -1, True, 1.0, "2", None]:
+            with self.subTest(version=version):
+                receipt = protocol_receipt(notificationPolicyVersion=version)
+                with self.assertRaises(audit.RemoteApiError) as caught:
+                    audit.validate_protocol_response(receipt)
+                message = str(caught.exception)
+                self.assertIn("notification policy version", message)
+                self.assertIn(repr(version), message)
+                self.assertIn("worker supports 1, 2", message)
+
+    def test_handshake_rejects_a_missing_policy_version(self):
+        receipt = protocol_receipt()
+        receipt.pop("notificationPolicyVersion")
+        with self.assertRaises(audit.RemoteApiError):
+            audit.validate_protocol_response(receipt)
+
+    def test_handshake_rejects_ceilings_outside_the_range_and_names_the_value(self):
+        for limit in [0, -1, audit.MAX_MEMBER_NOTIFICATION_LIMIT + 1]:
+            with self.subTest(limit=limit):
+                receipt = protocol_receipt(memberNotificationLimit=limit)
+                with self.assertRaises(audit.RemoteApiError) as caught:
+                    audit.validate_protocol_response(receipt)
+                message = str(caught.exception)
+                self.assertIn("memberNotificationLimit", message)
+                self.assertIn(repr(limit), message)
+                self.assertIn(
+                    f"1-{audit.MAX_MEMBER_NOTIFICATION_LIMIT}",
+                    message,
+                )
+
+    def test_sync_receipt_accepts_supported_versions_and_rejects_unknown_ones(self):
+        cycle_id = "audit-" + "a" * 32
+        for version in sorted(audit.SUPPORTED_NOTIFICATION_POLICY_VERSIONS):
+            with self.subTest(version=version, expected="accepted"):
+                receipt = sync_receipt(
+                    notification_mode=audit.NOTIFICATION_MODE_SUPPRESS,
+                    cycle_id=cycle_id,
+                    plex_user_id="42",
+                    result="planned",
+                )
+                receipt["notificationPolicyVersion"] = version
+                self.assertIs(
+                    receipt,
+                    audit.validate_sync_response(
+                        receipt,
+                        notification_mode=audit.NOTIFICATION_MODE_SUPPRESS,
+                        cycle_id=cycle_id,
+                        plex_user_id="42",
+                        onboarding_requested=False,
+                    ),
+                )
+
+        for version in [3, 0, -1, True, 1.0, "2"]:
+            with self.subTest(version=version, expected="rejected"):
+                receipt = sync_receipt(
+                    notification_mode=audit.NOTIFICATION_MODE_SUPPRESS,
+                    cycle_id=cycle_id,
+                    plex_user_id="42",
+                    result="planned",
+                )
+                receipt["notificationPolicyVersion"] = version
+                with self.assertRaises(audit.RemoteApiError) as caught:
+                    audit.validate_sync_response(
+                        receipt,
+                        notification_mode=audit.NOTIFICATION_MODE_SUPPRESS,
+                        cycle_id=cycle_id,
+                        plex_user_id="42",
+                        onboarding_requested=False,
+                    )
+                self.assertIn(repr(version), str(caught.exception))
+
+    def _registry_with_gate(self, directory, policy_version, index):
+        path = Path(directory) / f"registry-{index}.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "users": {},
+                    "memberNotificationPermitHistory": {},
+                    "memberNotificationGate": {
+                        "policyVersion": policy_version,
+                        "cycleId": "audit-" + "a" * 32,
+                        "plexUserId": "42",
+                        "reservedAt": NOW.isoformat(),
+                        "status": "reserved",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def test_registry_gate_reads_every_supported_policy_version(self):
+        """A version-2 gate must load - otherwise a rolled-forward worker's own
+
+        registry records lock the worker out at configuration load, which is a
+        worse failure than the handshake one because it happens before any
+        diagnostic is emitted.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            for index, version in enumerate(
+                sorted(audit.SUPPORTED_NOTIFICATION_POLICY_VERSIONS)
+            ):
+                with self.subTest(version=version):
+                    path = self._registry_with_gate(directory, version, index)
+                    registry = audit.Registry(path)
+                    registry.load()
+                    self.assertFalse(
+                        registry.notification_permit_available(NOW + timedelta(hours=1))
+                    )
+
+    def test_registry_gate_rejects_unknown_policy_versions_and_names_the_value(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for index, version in enumerate([3, 0, -1]):
+                with self.subTest(version=version):
+                    path = self._registry_with_gate(directory, version, 100 + index)
+                    with self.assertRaises(audit.ConfigurationError) as caught:
+                        audit.Registry(path).load()
+                    message = str(caught.exception)
+                    self.assertIn("memberNotificationGate policy version", message)
+                    self.assertIn(repr(version), message)
+
+    def test_the_written_gate_version_stays_at_the_rollback_safe_baseline(self):
+        """Guards the rollback path. If this fails, deploying the build makes
+
+        the registry unreadable to the previous worker image and rollback stops
+        working. Changing it is a deliberate decision, not a refactor.
+        """
+        self.assertEqual(1, audit.NOTIFICATION_GATE_POLICY_VERSION)
+        self.assertIn(
+            audit.NOTIFICATION_GATE_POLICY_VERSION,
+            audit.SUPPORTED_NOTIFICATION_POLICY_VERSIONS,
+        )
+        self.assertEqual(
+            min(audit.SUPPORTED_NOTIFICATION_POLICY_VERSIONS),
+            audit.NOTIFICATION_GATE_POLICY_VERSION,
+        )
 
 if __name__ == "__main__":
     unittest.main()
