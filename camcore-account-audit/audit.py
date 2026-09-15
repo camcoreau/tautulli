@@ -66,6 +66,14 @@ PERMIT_CONFLICT_RETRY_DELAYS_SECONDS = (0.25, 0.5, 1.0)
 ENRICHMENT_RETRY_DELAY_SECONDS = 300
 ENRICHMENT_MAX_CONSECUTIVE_FAILURES = 3
 ENRICHMENT_TERMINAL_EXIT_CODE = 3
+# A protocol fault means the CMA app is advertising a contract this worker does
+# not implement. Retrying cannot fix it, and a worker that sleeps and retries
+# forever stays "running" while doing no work at all - which is exactly how the
+# 13-14 September 2026 outage stayed invisible for 13h48m (OPS-440). Allow one
+# repeat in case a transient failure presents as a protocol fault, then exit so
+# the container state tells the truth (OPS-441).
+PROTOCOL_MAX_CONSECUTIVE_FAILURES = 2
+PROTOCOL_TERMINAL_EXIT_CODE = 4
 NOTIFICATION_GATE_STATUSES = frozenset(
     {
         "reserved",
@@ -109,6 +117,14 @@ class EnrichmentError(RemoteApiError):
         super().__init__(message)
         self.reason = reason
         self.cycle_id: str | None = None
+
+
+class ProtocolError(RemoteApiError):
+    """The CMA app advertises a contract this worker does not implement.
+
+    Deterministic and permanent for as long as both sides stay as they are, so
+    the run loop stops retrying rather than idling (OPS-441).
+    """
 
 
 class RemoteHttpError(RemoteApiError):
@@ -1138,29 +1154,29 @@ def validate_protocol_response(response: Any) -> dict[str, Any]:
         "onboardingProtocolVersion",
     }
     if not isinstance(response, dict) or set(response) != expected_keys:
-        raise RemoteApiError("YouTrack account sync protocol receipt is incompatible")
+        raise ProtocolError("YouTrack account sync protocol receipt is incompatible")
     if response.get("appName") != NOTIFICATION_PROTOCOL_ID:
-        raise RemoteApiError("YouTrack account sync protocol identity is incompatible")
+        raise ProtocolError("YouTrack account sync protocol identity is incompatible")
     policy_version = response.get("notificationPolicyVersion")
     if (
         isinstance(policy_version, bool)
         or not isinstance(policy_version, int)
         or policy_version not in SUPPORTED_NOTIFICATION_POLICY_VERSIONS
     ):
-        raise RemoteApiError(
+        raise ProtocolError(
             f"YouTrack account sync notification policy version "
             f"{policy_version!r} is not supported (worker supports "
             f"{_supported_policy_versions_text()})"
         )
     if response.get("notificationModes") != list(NOTIFICATION_PROTOCOL_MODES):
-        raise RemoteApiError("YouTrack account sync protocol modes are incompatible")
+        raise ProtocolError("YouTrack account sync protocol modes are incompatible")
     onboarding_version = response.get("onboardingProtocolVersion")
     if (
         isinstance(onboarding_version, bool)
         or not isinstance(onboarding_version, int)
         or onboarding_version != ONBOARDING_PROTOCOL_VERSION
     ):
-        raise RemoteApiError("YouTrack account sync onboarding protocol is incompatible")
+        raise ProtocolError("YouTrack account sync onboarding protocol is incompatible")
     member_limit = response.get("memberNotificationLimit")
     if (
         isinstance(member_limit, bool)
@@ -1168,7 +1184,7 @@ def validate_protocol_response(response: Any) -> dict[str, Any]:
         or member_limit < 1
         or member_limit > MAX_MEMBER_NOTIFICATION_LIMIT
     ):
-        raise RemoteApiError(
+        raise ProtocolError(
             f"YouTrack account sync memberNotificationLimit {member_limit!r} is "
             f"outside the accepted range 1-{MAX_MEMBER_NOTIFICATION_LIMIT}"
         )
@@ -1178,7 +1194,7 @@ def validate_protocol_response(response: Any) -> dict[str, Any]:
         or not isinstance(window_seconds, int)
         or window_seconds != int(MEMBER_NOTIFICATION_WINDOW.total_seconds())
     ):
-        raise RemoteApiError("YouTrack account sync notification window is incompatible")
+        raise ProtocolError("YouTrack account sync notification window is incompatible")
     return response
 
 
@@ -1742,6 +1758,45 @@ def report_enrichment_abort(
         )
 
 
+def report_protocol_abort(
+    exc: Exception,
+    *,
+    consecutive_failures: int,
+    terminal: bool,
+) -> None:
+    """Record a protocol fault, and say plainly when the worker is giving up."""
+    print(
+        json.dumps(
+            {
+                "event": "protocol-fault",
+                "message": str(exc),
+                "consecutiveFailures": consecutive_failures,
+                "maxConsecutiveFailures": PROTOCOL_MAX_CONSECUTIVE_FAILURES,
+                "terminal": terminal,
+            },
+            sort_keys=True,
+        ),
+        file=sys.stderr,
+    )
+    if terminal:
+        print(
+            json.dumps(
+                {
+                    "event": "protocol-abort-terminal",
+                    "message": (
+                        "The CMA app advertises a notification contract this "
+                        "worker does not implement. Exiting so the container "
+                        "state reflects the fault instead of idling."
+                    ),
+                    "consecutiveFailures": consecutive_failures,
+                    "exitCode": PROTOCOL_TERMINAL_EXIT_CODE,
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+
+
 def run(config: Config) -> int:
     if config.interval_seconds == 0:
         try:
@@ -1756,11 +1811,13 @@ def run(config: Config) -> int:
             return ENRICHMENT_TERMINAL_EXIT_CODE
 
     consecutive_enrichment_failures = 0
+    consecutive_protocol_failures = 0
     while True:
         try:
             exit_code = run_once(config)
             if exit_code == 0:
                 consecutive_enrichment_failures = 0
+                consecutive_protocol_failures = 0
         except EnrichmentError as exc:
             consecutive_enrichment_failures += 1
             terminal = (
@@ -1777,6 +1834,20 @@ def run(config: Config) -> int:
                 return ENRICHMENT_TERMINAL_EXIT_CODE
             time.sleep(ENRICHMENT_RETRY_DELAY_SECONDS)
             continue
+        except ProtocolError as exc:
+            consecutive_protocol_failures += 1
+            terminal = (
+                consecutive_protocol_failures
+                >= PROTOCOL_MAX_CONSECUTIVE_FAILURES
+            )
+            report_protocol_abort(
+                exc,
+                consecutive_failures=consecutive_protocol_failures,
+                terminal=terminal,
+            )
+            if terminal:
+                return PROTOCOL_TERMINAL_EXIT_CODE
+            exit_code = 1
         except (ConfigurationError, RemoteApiError) as exc:
             exit_code = 1
             print(json.dumps({"event": "run-error", "message": str(exc)}), file=sys.stderr)

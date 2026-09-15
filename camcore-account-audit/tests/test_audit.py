@@ -2998,5 +2998,120 @@ class NotificationPolicyVersionTests(unittest.TestCase):
             audit.NOTIFICATION_GATE_POLICY_VERSION,
         )
 
+class ProtocolAbortTests(unittest.TestCase):
+    """OPS-441: a worker that cannot work must not look like one that can.
+
+    On 13-14 September 2026 the worker refused the protocol handshake, printed
+    two lines, slept six hours and repeated - four times. The container stayed
+    `running` with restart_count 0, so every monitor correctly reported it
+    healthy. These tests pin the behaviour that makes container state truthful.
+    """
+
+    @staticmethod
+    def fault(message="synthetic protocol fault"):
+        return audit.ProtocolError(message)
+
+    @staticmethod
+    def runtime_config(path, *, interval_seconds):
+        return audit.replace(config(path), interval_seconds=interval_seconds)
+
+    def test_protocol_error_is_still_a_remote_api_error(self):
+        """In-cycle handlers catch RemoteApiError; they must keep working."""
+        self.assertTrue(issubclass(audit.ProtocolError, audit.RemoteApiError))
+
+    def test_refused_handshake_raises_a_protocol_error(self):
+        receipt = protocol_receipt(notificationPolicyVersion=99)
+        with self.assertRaises(audit.ProtocolError):
+            audit.validate_protocol_response(receipt)
+
+    def test_repeated_protocol_faults_exit_terminally_instead_of_sleeping(self):
+        faults = [self.fault() for _ in range(5)]
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            audit, "run_once", side_effect=faults
+        ) as run_once, mock.patch.object(
+            audit.time, "sleep"
+        ) as sleep, redirect_stderr(stderr):
+            exit_code = audit.run(
+                self.runtime_config(
+                    Path(directory) / "registry.json",
+                    interval_seconds=21600,
+                )
+            )
+
+        self.assertEqual(audit.PROTOCOL_TERMINAL_EXIT_CODE, exit_code)
+        # One repeat is tolerated, then it stops. It does not run five cycles.
+        self.assertEqual(audit.PROTOCOL_MAX_CONSECUTIVE_FAILURES, run_once.call_count)
+        # Exactly one sleep: after the first fault. Not after the second.
+        self.assertEqual(1, sleep.call_count)
+
+        events = [json.loads(line) for line in stderr.getvalue().splitlines()]
+        self.assertEqual(
+            ["protocol-fault", "protocol-fault", "protocol-abort-terminal"],
+            [event["event"] for event in events],
+        )
+        self.assertFalse(events[0]["terminal"])
+        self.assertTrue(events[1]["terminal"])
+        self.assertEqual(1, events[0]["consecutiveFailures"])
+        self.assertEqual(2, events[1]["consecutiveFailures"])
+        self.assertEqual(
+            audit.PROTOCOL_TERMINAL_EXIT_CODE, events[2]["exitCode"]
+        )
+
+    def test_a_healthy_cycle_resets_the_protocol_fault_count(self):
+        """A single fault either side of a good cycle must not accumulate."""
+        outcomes = [self.fault(), 0, self.fault(), self.fault()]
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            audit, "run_once", side_effect=outcomes
+        ) as run_once, mock.patch.object(
+            audit.time, "sleep"
+        ), redirect_stderr(stderr):
+            exit_code = audit.run(
+                self.runtime_config(
+                    Path(directory) / "registry.json",
+                    interval_seconds=21600,
+                )
+            )
+
+        self.assertEqual(audit.PROTOCOL_TERMINAL_EXIT_CODE, exit_code)
+        # All four outcomes were consumed: the clean cycle reset the counter,
+        # so the worker did not give up on the first isolated fault.
+        self.assertEqual(4, run_once.call_count)
+        events = [json.loads(line) for line in stderr.getvalue().splitlines()]
+        # fault (1), clean cycle resets, fault (1), fault (2) + the terminal
+        # record, which repeats the count.
+        self.assertEqual(
+            [1, 1, 2, 2],
+            [
+                event["consecutiveFailures"]
+                for event in events
+                if "consecutiveFailures" in event
+            ],
+        )
+        self.assertEqual("protocol-abort-terminal", events[-1]["event"])
+
+    def test_transient_remote_errors_still_retry_forever(self):
+        """Only protocol faults are terminal. A Tautulli blip must not stop CMA."""
+        stop = RuntimeError("stop the loop")
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            audit,
+            "run_once",
+            side_effect=audit.RemoteApiError("Tautulli returned HTTP 503"),
+        ) as run_once, mock.patch.object(
+            audit.time, "sleep", side_effect=[None, None, stop]
+        ) as sleep, redirect_stderr(io.StringIO()):
+            with self.assertRaises(RuntimeError):
+                audit.run(
+                    self.runtime_config(
+                        Path(directory) / "registry.json",
+                        interval_seconds=21600,
+                    )
+                )
+
+        # Three cycles, three sleeps, no terminal exit - unchanged behaviour.
+        self.assertEqual(3, run_once.call_count)
+        self.assertEqual(3, sleep.call_count)
+
 if __name__ == "__main__":
     unittest.main()
